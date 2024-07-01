@@ -5,16 +5,15 @@
  */
 
 // Container: https://developers.google.com/speed/webp/docs/riff_container
-// Lossless format: https://developers.google.com/speed/webp/docs/webp_lossless_bitstream_specification
 
 #include <AK/BitStream.h>
 #include <AK/Debug.h>
-#include <LibCompress/DeflateTables.h>
+#include <AK/Endian.h>
+#include <AK/MemoryStream.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImageFormats/AnimationWriter.h>
 #include <LibGfx/ImageFormats/WebPShared.h>
 #include <LibGfx/ImageFormats/WebPWriter.h>
-#include <LibRIFF/RIFF.h>
 
 namespace Gfx {
 
@@ -22,15 +21,15 @@ namespace Gfx {
 static ErrorOr<void> write_webp_header(Stream& stream, unsigned data_size)
 {
     TRY(stream.write_until_depleted("RIFF"sv));
-    TRY(stream.write_value<LittleEndian<u32>>(4 + data_size)); // Including size of "WEBP" and the data size itself.
+    TRY(stream.write_value<LittleEndian<u32>>("WEBP"sv.length() + data_size));
     TRY(stream.write_until_depleted("WEBP"sv));
     return {};
 }
 
-static ErrorOr<void> write_chunk_header(Stream& stream, StringView chunk_fourcc, unsigned vp8l_data_size)
+static ErrorOr<void> write_chunk_header(Stream& stream, StringView chunk_fourcc, unsigned data_size)
 {
     TRY(stream.write_until_depleted(chunk_fourcc));
-    TRY(stream.write_value<LittleEndian<u32>>(vp8l_data_size));
+    TRY(stream.write_value<LittleEndian<u32>>(data_size));
     return {};
 }
 
@@ -67,127 +66,31 @@ static ErrorOr<void> write_VP8L_header(Stream& stream, unsigned width, unsigned 
     return {};
 }
 
-static bool are_all_pixels_opaque(Bitmap const& bitmap)
+// FIXME: Consider using LibRIFF for RIFF writing details. (It currently has no writing support.)
+static ErrorOr<void> align_to_two(Stream& stream, size_t number_of_bytes_written)
 {
-    for (ARGB32 pixel : bitmap) {
-        if ((pixel >> 24) != 0xff)
-            return false;
-    }
-    return true;
+    // https://developers.google.com/speed/webp/docs/riff_container
+    // "If Chunk Size is odd, a single padding byte -- which MUST be 0 to conform with RIFF -- is added."
+    if (number_of_bytes_written % 2 != 0)
+        TRY(stream.write_value<u8>(0));
+    return {};
 }
 
-static ErrorOr<void> write_VP8L_image_data(Stream& stream, Bitmap const& bitmap)
+constexpr size_t vp8l_header_size = 5; // 1 byte signature + (2 * 14 bits width and height + 1 bit alpha hint + 3 bit version_number)
+
+static size_t compute_VP8L_chunk_size(ByteBuffer const& data)
 {
-    LittleEndianOutputBitStream bit_stream { MaybeOwned<Stream>(stream) };
+    constexpr size_t chunk_header_size = 8; // "VP8L" + size
+    return chunk_header_size + align_up_to(vp8l_header_size + data.size(), 2);
+}
 
-    // optional-transform   =  (%b1 transform optional-transform) / %b0
-    TRY(bit_stream.write_bits(0u, 1u)); // No transform for now.
-
-    // https://developers.google.com/speed/webp/docs/webp_lossless_bitstream_specification#5_image_data
-    // spatially-coded-image =  color-cache-info meta-prefix data
-
-    // color-cache-info      =  %b0
-    // color-cache-info      =/ (%b1 4BIT) ; 1 followed by color cache size
-    TRY(bit_stream.write_bits(0u, 1u)); // No color cache for now.
-
-    // meta-prefix           =  %b0 / (%b1 entropy-image)
-    TRY(bit_stream.write_bits(0u, 1u)); // No meta prefix for now.
-
-    // data                  =  prefix-codes lz77-coded-image
-    // prefix-codes          =  prefix-code-group *prefix-codes
-    // prefix-code-group     =
-    //     5prefix-code ; See "Interpretation of Meta Prefix Codes" to
-    //                  ; understand what each of these five prefix
-    //                  ; codes are for.
-
-    // We're writing a single prefix-code-group.
-    // "These codes are (in bitstream order):
-
-    //  Prefix code #1: Used for green channel, backward-reference length, and color cache.
-    //  Prefix code #2, #3, and #4: Used for red, blue, and alpha channels, respectively.
-    //  Prefix code #5: Used for backward-reference distance."
-
-    // We use neither back-references not color cache entries yet.
-    // We write prefix trees for 256 literals all of length 8, which means each byte is encoded as itself.
-    // That doesn't give any compression, but is a valid bit stream.
-    // We can make this smarter later on.
-
-    size_t const color_cache_size = 0;
-    constexpr Array alphabet_sizes = to_array<size_t>({ 256 + 24 + static_cast<size_t>(color_cache_size), 256, 256, 256, 40 }); // XXX Shared?
-
-    // If you add support for color cache: At the moment, CanonicalCodes does not support writing more than 288 symbols.
-    if (alphabet_sizes[0] > 288)
-        return Error::from_string_literal("Invalid alphabet size");
-
-    bool all_pixels_are_opaque = are_all_pixels_opaque(bitmap);
-
-    int number_of_full_channels = all_pixels_are_opaque ? 3 : 4;
-    for (int i = 0; i < number_of_full_channels; ++i) {
-        TRY(bit_stream.write_bits(0u, 1u)); // Normal code length code.
-
-        // Write code length codes.
-        constexpr int kCodeLengthCodes = 19;
-        Array<int, kCodeLengthCodes> kCodeLengthCodeOrder = { 17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-        int num_code_lengths = max(4u, find_index(kCodeLengthCodeOrder.begin(), kCodeLengthCodeOrder.end(), 8) + 1);
-
-        // "int num_code_lengths = 4 + ReadBits(4);"
-        TRY(bit_stream.write_bits(num_code_lengths - 4u, 4u));
-
-        for (int i = 0; i < num_code_lengths - 1; ++i)
-            TRY(bit_stream.write_bits(0u, 3u));
-        TRY(bit_stream.write_bits(1u, 3u));
-
-        // Write code lengths.
-        if (alphabet_sizes[i] == 256) {
-            TRY(bit_stream.write_bits(0u, 1u)); // max_symbol is alphabet_size
-        } else {
-            TRY(bit_stream.write_bits(1u, 1u)); // max_symbol is explicitly coded
-            // "int length_nbits = 2 + 2 * ReadBits(3);
-            //  int max_symbol = 2 + ReadBits(length_nbits);"
-            TRY(bit_stream.write_bits(3u, 3u));   // length_nbits = 2 + 2 * 3
-            TRY(bit_stream.write_bits(254u, 8u)); // max_symbol = 2 + 254
-        }
-
-        // The code length codes only contain a single entry for '8'. WebP streams with a single element store 0 bits per element.
-        // (This is different from deflate, which needs 1 bit per element.)
-    }
-
-    if (all_pixels_are_opaque) {
-        // Use a simple 1-element code.
-        TRY(bit_stream.write_bits(1u, 1u));   // Simple code length code.
-        TRY(bit_stream.write_bits(0u, 1u));   // num_symbols - 1
-        TRY(bit_stream.write_bits(1u, 1u));   // is_first_8bits
-        TRY(bit_stream.write_bits(255u, 8u)); // symbol0
-    }
-
-    // For code #5, use a simple empty code, since we don't use this yet.
-    TRY(bit_stream.write_bits(1u, 1u)); // Simple code length code.
-    TRY(bit_stream.write_bits(0u, 1u)); // num_symbols - 1
-    TRY(bit_stream.write_bits(0u, 1u)); // is_first_8bits
-    TRY(bit_stream.write_bits(0u, 1u)); // symbol0
-
-    // Image data.
-    for (ARGB32 pixel : bitmap) {
-        u8 a = pixel >> 24;
-        u8 r = pixel >> 16;
-        u8 g = pixel >> 8;
-        u8 b = pixel;
-
-        // We wrote a huffman table that gives every symbol 8 bits. That means we can write the image data
-        // out uncompressed –- but we do need to reverse the bit order of the bytes.
-        TRY(bit_stream.write_bits(Compress::reverse8_lookup_table[g], 8u));
-        TRY(bit_stream.write_bits(Compress::reverse8_lookup_table[r], 8u));
-        TRY(bit_stream.write_bits(Compress::reverse8_lookup_table[b], 8u));
-
-        // If all pixels are opaque, we wrote a one-element huffman table for alpha, which needs 0 bits per element.
-        if (!all_pixels_are_opaque)
-            TRY(bit_stream.write_bits(Compress::reverse8_lookup_table[a], 8u));
-    }
-
-    // FIXME: Make ~LittleEndianOutputBitStream do this, or make it VERIFY() that it has happened at least.
-    TRY(bit_stream.align_to_byte_boundary());
-    TRY(bit_stream.flush_buffer_to_stream());
-
+static ErrorOr<void> write_VP8L_chunk(Stream& stream, unsigned width, unsigned height, bool alpha_is_used_hint, ByteBuffer const& data)
+{
+    size_t const number_of_bytes_written = vp8l_header_size + data.size();
+    TRY(write_chunk_header(stream, "VP8L"sv, number_of_bytes_written));
+    TRY(write_VP8L_header(stream, width, height, alpha_is_used_hint));
+    TRY(stream.write_until_depleted(data));
+    TRY(align_to_two(stream, number_of_bytes_written));
     return {};
 }
 
@@ -272,38 +175,23 @@ static ErrorOr<void> write_VP8X_chunk(Stream& stream, VP8XHeader const& header)
 // FIXME: Consider using LibRIFF for RIFF writing details. (It currently has no writing support.)
 static ErrorOr<void> align_to_two(AllocatingMemoryStream& stream)
 {
-    // https://developers.google.com/speed/webp/docs/riff_container
-    // "If Chunk Size is odd, a single padding byte -- which MUST be 0 to conform with RIFF -- is added."
-    if (stream.used_buffer_size() % 2 != 0)
-        TRY(stream.write_value<u8>(0));
-    return {};
+    return align_to_two(stream, stream.used_buffer_size());
 }
 
 ErrorOr<void> WebPWriter::encode(Stream& stream, Bitmap const& bitmap, Options const& options)
 {
-    bool alpha_is_used_hint = !are_all_pixels_opaque(bitmap);
-    dbgln_if(WEBP_DEBUG, "Writing WebP of size {} with alpha hint: {}", bitmap.size(), alpha_is_used_hint);
-
     // The chunk headers need to know their size, so we either need a SeekableStream or need to buffer the data. We're doing the latter.
-    // FIXME: The whole writing-and-reading-into-buffer over-and-over is awkward and inefficient.
-    AllocatingMemoryStream vp8l_header_stream;
-    TRY(write_VP8L_header(vp8l_header_stream, bitmap.width(), bitmap.height(), alpha_is_used_hint));
-    auto vp8l_header_bytes = TRY(vp8l_header_stream.read_until_eof());
-
-    AllocatingMemoryStream vp8l_data_stream;
-    TRY(write_VP8L_image_data(vp8l_data_stream, bitmap));
-    auto vp8l_data_bytes = TRY(vp8l_data_stream.read_until_eof());
-
-    AllocatingMemoryStream vp8l_chunk_stream;
-    TRY(write_chunk_header(vp8l_chunk_stream, "VP8L"sv, vp8l_header_bytes.size() + vp8l_data_bytes.size()));
-    TRY(vp8l_chunk_stream.write_until_depleted(vp8l_header_bytes));
-    TRY(vp8l_chunk_stream.write_until_depleted(vp8l_data_bytes));
-    TRY(align_to_two(vp8l_chunk_stream));
-    auto vp8l_chunk_bytes = TRY(vp8l_chunk_stream.read_until_eof());
+    bool is_fully_opaque;
+    auto vp8l_data_bytes = TRY(compress_VP8L_image_data(bitmap, options.vp8l_options, is_fully_opaque));
+    bool alpha_is_used_hint = !is_fully_opaque;
+    dbgln_if(WEBP_DEBUG, "Writing WebP of size {} with alpha hint: {}", bitmap.size(), alpha_is_used_hint);
 
     ByteBuffer vp8x_chunk_bytes;
     ByteBuffer iccp_chunk_bytes;
     if (options.icc_data.has_value()) {
+        // FIXME: The whole writing-and-reading-into-buffer over-and-over is awkward and inefficient.
+        //        Maybe add an abstraction that knows its size and can write its data later. This would
+        //        allow saving a few copies.
         dbgln_if(WEBP_DEBUG, "Writing VP8X and ICCP chunks.");
         AllocatingMemoryStream iccp_chunk_stream;
         TRY(write_chunk_header(iccp_chunk_stream, "ICCP"sv, options.icc_data.value().size()));
@@ -317,20 +205,21 @@ ErrorOr<void> WebPWriter::encode(Stream& stream, Bitmap const& bitmap, Options c
         vp8x_chunk_bytes = TRY(vp8x_chunk_stream.read_until_eof());
     }
 
-    u32 total_size = vp8x_chunk_bytes.size() + iccp_chunk_bytes.size() + vp8l_chunk_bytes.size();
+    u32 total_size = vp8x_chunk_bytes.size() + iccp_chunk_bytes.size() + compute_VP8L_chunk_size(vp8l_data_bytes);
     TRY(write_webp_header(stream, total_size));
     TRY(stream.write_until_depleted(vp8x_chunk_bytes));
     TRY(stream.write_until_depleted(iccp_chunk_bytes));
-    TRY(stream.write_until_depleted(vp8l_chunk_bytes));
+    TRY(write_VP8L_chunk(stream, bitmap.width(), bitmap.height(), alpha_is_used_hint, vp8l_data_bytes));
     return {};
 }
 
 class WebPAnimationWriter : public AnimationWriter {
 public:
-    WebPAnimationWriter(SeekableStream& stream, IntSize dimensions, u8 original_vp8x_flags)
+    WebPAnimationWriter(SeekableStream& stream, IntSize dimensions, u8 original_vp8x_flags, VP8LEncoderOptions vp8l_options)
         : m_stream(stream)
         , m_dimensions(dimensions)
         , m_vp8x_flags(original_vp8x_flags)
+        , m_vp8l_options(vp8l_options)
     {
     }
 
@@ -343,18 +232,15 @@ private:
     SeekableStream& m_stream;
     IntSize m_dimensions;
     u8 m_vp8x_flags { 0 };
+    VP8LEncoderOptions m_vp8l_options;
 };
 
 static ErrorOr<void> align_to_two(SeekableStream& stream)
 {
-    // https://developers.google.com/speed/webp/docs/riff_container
-    // "If Chunk Size is odd, a single padding byte -- which MUST be 0 to conform with RIFF -- is added."
-    if (TRY(stream.tell()) % 2 != 0)
-        TRY(stream.write_value<u8>(0));
-    return {};
+    return align_to_two(stream, TRY(stream.tell()));
 }
 
-static ErrorOr<void> write_ANMF_chunk(Stream& stream, ANMFChunk const& chunk)
+static ErrorOr<void> write_ANMF_chunk_header(Stream& stream, ANMFChunkHeader const& chunk, size_t payload_size)
 {
     if (chunk.frame_width > (1 << 24) || chunk.frame_height > (1 << 24))
         return Error::from_string_literal("WebP dimensions too large for ANMF chunk");
@@ -368,7 +254,7 @@ static ErrorOr<void> write_ANMF_chunk(Stream& stream, ANMFChunk const& chunk)
     dbgln_if(WEBP_DEBUG, "writing ANMF frame_x {} frame_y {} frame_width {} frame_height {} frame_duration {} blending_method {} disposal_method {}",
         chunk.frame_x, chunk.frame_y, chunk.frame_width, chunk.frame_height, chunk.frame_duration_in_milliseconds, (int)chunk.blending_method, (int)chunk.disposal_method);
 
-    TRY(write_chunk_header(stream, "ANMF"sv, 16 + chunk.frame_data.size()));
+    TRY(write_chunk_header(stream, "ANMF"sv, 16 + payload_size));
 
     LittleEndianOutputBitStream bit_stream { MaybeOwned<Stream>(stream) };
 
@@ -398,22 +284,17 @@ static ErrorOr<void> write_ANMF_chunk(Stream& stream, ANMFChunk const& chunk)
     //  MUST be 0. Readers MUST ignore this field."
 
     // "Blending method (B): 1 bit"
-    if (chunk.blending_method == ANMFChunk::BlendingMethod::DoNotBlend)
+    if (chunk.blending_method == ANMFChunkHeader::BlendingMethod::DoNotBlend)
         flags |= 0x2;
 
     // "Disposal method (D): 1 bit"
-    if (chunk.disposal_method == ANMFChunk::DisposalMethod::DisposeToBackgroundColor)
+    if (chunk.disposal_method == ANMFChunkHeader::DisposalMethod::DisposeToBackgroundColor)
         flags |= 0x1;
 
     TRY(bit_stream.write_bits(flags, 8u));
 
     // FIXME: Make ~LittleEndianOutputBitStream do this, or make it VERIFY() that it has happened at least.
     TRY(bit_stream.flush_buffer_to_stream());
-
-    TRY(stream.write_until_depleted(chunk.frame_data));
-
-    if (chunk.frame_data.size() % 2 != 0)
-        TRY(stream.write_value<u8>(0));
 
     return {};
 }
@@ -423,37 +304,28 @@ ErrorOr<void> WebPAnimationWriter::add_frame(Bitmap& bitmap, int duration_ms, In
     if (at.x() < 0 || at.y() < 0 || at.x() + bitmap.width() > m_dimensions.width() || at.y() + bitmap.height() > m_dimensions.height())
         return Error::from_string_literal("Frame does not fit in animation dimensions");
 
-    // FIXME: The whole writing-and-reading-into-buffer over-and-over is awkward and inefficient.
-    AllocatingMemoryStream vp8l_header_stream;
-    TRY(write_VP8L_header(vp8l_header_stream, bitmap.width(), bitmap.height(), true));
-    auto vp8l_header_bytes = TRY(vp8l_header_stream.read_until_eof());
+    // Since we have a SeekableStream, we could write both the VP8L chunk header and the ANMF chunk header with a placeholder size,
+    // compress the frame data directly to the stream, and then go back and update the two sizes.
+    // That's pretty messy though, and the compressed image data is smaller than the uncompressed bitmap passed in. So we'll buffer it.
+    bool is_fully_opaque;
+    auto vp8l_data_bytes = TRY(compress_VP8L_image_data(bitmap, m_vp8l_options, is_fully_opaque));
 
-    AllocatingMemoryStream vp8l_data_stream;
-    TRY(write_VP8L_image_data(vp8l_data_stream, bitmap));
-    auto vp8l_data_bytes = TRY(vp8l_data_stream.read_until_eof());
-
-    AllocatingMemoryStream vp8l_chunk_stream;
-    TRY(write_chunk_header(vp8l_chunk_stream, "VP8L"sv, vp8l_header_bytes.size() + vp8l_data_bytes.size()));
-    TRY(vp8l_chunk_stream.write_until_depleted(vp8l_header_bytes));
-    TRY(vp8l_chunk_stream.write_until_depleted(vp8l_data_bytes));
-    TRY(align_to_two(vp8l_chunk_stream));
-    auto vp8l_chunk_bytes = TRY(vp8l_chunk_stream.read_until_eof());
-
-    ANMFChunk chunk;
+    ANMFChunkHeader chunk;
     chunk.frame_x = static_cast<u32>(at.x());
     chunk.frame_y = static_cast<u32>(at.y());
     chunk.frame_width = static_cast<u32>(bitmap.width());
     chunk.frame_height = static_cast<u32>(bitmap.height());
     chunk.frame_duration_in_milliseconds = static_cast<u32>(duration_ms);
-    chunk.blending_method = ANMFChunk::BlendingMethod::DoNotBlend;
-    chunk.disposal_method = ANMFChunk::DisposalMethod::DoNotDispose;
-    chunk.frame_data = vp8l_chunk_bytes;
+    chunk.blending_method = ANMFChunkHeader::BlendingMethod::DoNotBlend;
+    chunk.disposal_method = ANMFChunkHeader::DisposalMethod::DoNotDispose;
 
-    TRY(write_ANMF_chunk(m_stream, chunk));
+    TRY(write_ANMF_chunk_header(m_stream, chunk, compute_VP8L_chunk_size(vp8l_data_bytes)));
+    bool alpha_is_used_hint = !is_fully_opaque;
+    TRY(write_VP8L_chunk(m_stream, bitmap.width(), bitmap.height(), alpha_is_used_hint, vp8l_data_bytes));
 
     TRY(update_size_in_header());
 
-    if (!(m_vp8x_flags & 0x10) && !are_all_pixels_opaque(bitmap))
+    if (!(m_vp8x_flags & 0x10) && !is_fully_opaque)
         TRY(set_alpha_bit_in_header());
 
     return {};
@@ -474,6 +346,12 @@ ErrorOr<void> WebPAnimationWriter::set_alpha_bit_in_header()
     m_vp8x_flags |= 0x10;
 
     auto current_offset = TRY(m_stream.tell());
+    // 4 bytes for "RIFF",
+    // 4 bytes RIFF chunk size (i.e. file size - 8),
+    // 4 bytes for "WEBP",
+    // 4 bytes for "VP8X",
+    // 4 bytes for VP8X chunk size,
+    // followed by VP8X flags in the first byte of the VP8X chunk data.
     TRY(m_stream.seek(20, SeekMode::SetPosition));
     TRY(m_stream.write_value<u8>(m_vp8x_flags));
     TRY(m_stream.seek(current_offset, SeekMode::SetPosition));
@@ -510,7 +388,7 @@ ErrorOr<NonnullOwnPtr<AnimationWriter>> WebPWriter::start_encoding_animation(See
 
     TRY(write_ANIM_chunk(stream, { .background_color = background_color.value(), .loop_count = static_cast<u16>(loop_count) }));
 
-    auto writer = make<WebPAnimationWriter>(stream, dimensions, vp8x_flags_from_header(vp8x_header));
+    auto writer = make<WebPAnimationWriter>(stream, dimensions, vp8x_flags_from_header(vp8x_header), options.vp8l_options);
     TRY(writer->update_size_in_header());
     return writer;
 }

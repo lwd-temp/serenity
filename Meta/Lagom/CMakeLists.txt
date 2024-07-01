@@ -343,9 +343,10 @@ install(TARGETS LibC LibCrypt LibSystem NoCoverage EXPORT LagomTargets)
 # AK
 add_serenity_subdirectory(AK)
 lagom_lib(AK ak SOURCES ${AK_SOURCES})
-if (${CMAKE_SYSTEM_NAME} MATCHES "BSD$" OR HAIKU)
-    # BSD Platforms and Haiku have backtrace(3) in a separate library
-    target_link_libraries(AK PRIVATE execinfo)
+find_package(Backtrace)
+if (Backtrace_FOUND AND NOT "${Backtrace_LIBRARIES}" STREQUAL "")
+    target_link_libraries(AK PRIVATE ${Backtrace_LIBRARIES})
+    target_include_directories(AK PRIVATE ${Backtrace_INCLUDE_DIRS})
 endif()
 
 add_serenity_subdirectory(Userland/Libraries/LibUnicode)
@@ -356,7 +357,8 @@ add_serenity_subdirectory(Userland/Libraries/LibCore)
 target_link_libraries(LibCore PRIVATE Threads::Threads)
 if (${CMAKE_SYSTEM_NAME} MATCHES "NetBSD")
     # NetBSD has its shm_open and shm_unlink functions in librt so we need to link that
-    target_link_libraries(LibCore PRIVATE librt.so)
+    target_link_libraries(LibCore PRIVATE rt)
+    target_link_libraries(LibCoreMinimal PRIVATE rt)
 endif()
 if (${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
     # Solaris has socket and networking related functions in two extra libraries
@@ -609,6 +611,7 @@ if (BUILD_LAGOM)
         lagom_utility(xml SOURCES ../../Userland/Utilities/xml.cpp LIBS LibFileSystem LibMain LibXML LibURL)
         lagom_utility(xzcat SOURCES ../../Userland/Utilities/xzcat.cpp LIBS LibCompress LibMain)
         lagom_utility(fdtdump SOURCES ../../Userland/Utilities/fdtdump.cpp LIBS LibDeviceTree LibMain)
+        lagom_utility(crypto-bench SOURCES ../../Userland/Utilities/crypto-bench.cpp LIBS LibMain LibCrypto)
 
         enable_testing()
         # LibTest
@@ -636,6 +639,7 @@ if (BUILD_LAGOM)
             LibCompress
             LibGL
             LibGfx
+            LibHTTP
             LibIMAP
             LibLocale
             LibMarkdown
@@ -646,6 +650,7 @@ if (BUILD_LAGOM)
             LibTTF
             LibTimeZone
             LibUnicode
+            LibURL
             LibVideo
             LibXML
         )

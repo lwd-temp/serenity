@@ -60,8 +60,9 @@ public:
         Unmapped,
     };
 
-    CreateArguments(Kind kind, bool is_immutable)
+    CreateArguments(Optional<Operand> dst, Kind kind, bool is_immutable)
         : Instruction(Type::CreateArguments)
+        , m_dst(dst)
         , m_kind(kind)
         , m_is_immutable(is_immutable)
     {
@@ -69,8 +70,14 @@ public:
 
     ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
     ByteString to_byte_string_impl(Bytecode::Executable const&) const;
+    void visit_operands_impl(Function<void(Operand&)> visitor)
+    {
+        if (m_dst.has_value())
+            visitor(m_dst.value());
+    }
 
 private:
+    Optional<Operand> m_dst;
     Kind m_kind;
     bool m_is_immutable { false };
 };
@@ -555,7 +562,7 @@ public:
     {
     }
 
-    ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
+    void execute_impl(Bytecode::Interpreter&) const;
     ByteString to_byte_string_impl(Bytecode::Executable const&) const;
 
 private:
@@ -986,6 +993,68 @@ private:
     Operand m_dst;
     Operand m_base;
     IdentifierTableIndex m_property;
+    Operand m_this_value;
+    u32 m_cache_index { 0 };
+};
+
+class GetLength final : public Instruction {
+public:
+    GetLength(Operand dst, Operand base, Optional<IdentifierTableIndex> base_identifier, u32 cache_index)
+        : Instruction(Type::GetLength)
+        , m_dst(dst)
+        , m_base(base)
+        , m_base_identifier(move(base_identifier))
+        , m_cache_index(cache_index)
+    {
+    }
+
+    ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
+    ByteString to_byte_string_impl(Bytecode::Executable const&) const;
+    void visit_operands_impl(Function<void(Operand&)> visitor)
+    {
+        visitor(m_dst);
+        visitor(m_base);
+    }
+
+    Operand dst() const { return m_dst; }
+    Operand base() const { return m_base; }
+    u32 cache_index() const { return m_cache_index; }
+
+private:
+    Operand m_dst;
+    Operand m_base;
+    Optional<IdentifierTableIndex> m_base_identifier;
+    u32 m_cache_index { 0 };
+};
+
+class GetLengthWithThis final : public Instruction {
+public:
+    GetLengthWithThis(Operand dst, Operand base, Operand this_value, u32 cache_index)
+        : Instruction(Type::GetLengthWithThis)
+        , m_dst(dst)
+        , m_base(base)
+        , m_this_value(this_value)
+        , m_cache_index(cache_index)
+    {
+    }
+
+    ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
+    ByteString to_byte_string_impl(Bytecode::Executable const&) const;
+    void visit_operands_impl(Function<void(Operand&)> visitor)
+    {
+        visitor(m_dst);
+        visitor(m_base);
+        visitor(m_this_value);
+    }
+
+    Operand dst() const { return m_dst; }
+    Operand base() const { return m_base; }
+    Operand this_value() const { return m_this_value; }
+    u32 cache_index() const { return m_cache_index; }
+
+private:
+    Operand m_dst;
+    Operand m_base;
     Operand m_this_value;
     u32 m_cache_index { 0 };
 };
@@ -2194,7 +2263,7 @@ public:
     {
     }
 
-    ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
+    void execute_impl(Bytecode::Interpreter&) const;
     ByteString to_byte_string_impl(Bytecode::Executable const&) const;
     void visit_labels_impl(Function<void(Label&)> visitor)
     {
@@ -2214,6 +2283,31 @@ private:
     Operand m_value;
 };
 
+class PrepareYield final : public Instruction {
+public:
+    explicit PrepareYield(Operand dest, Operand value)
+        : Instruction(Type::PrepareYield)
+        , m_dest(dest)
+        , m_value(value)
+    {
+    }
+
+    void execute_impl(Bytecode::Interpreter&) const;
+    ByteString to_byte_string_impl(Bytecode::Executable const&) const;
+    void visit_operands_impl(Function<void(Operand&)> visitor)
+    {
+        visitor(m_dest);
+        visitor(m_value);
+    }
+
+    Operand destination() const { return m_dest; }
+    Operand value() const { return m_value; }
+
+private:
+    Operand m_dest;
+    Operand m_value;
+};
+
 class Await final : public Instruction {
 public:
     constexpr static bool IsTerminator = true;
@@ -2225,7 +2319,7 @@ public:
     {
     }
 
-    ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
+    void execute_impl(Bytecode::Interpreter&) const;
     ByteString to_byte_string_impl(Bytecode::Executable const&) const;
     void visit_labels_impl(Function<void(Label&)> visitor)
     {
@@ -2456,23 +2550,14 @@ private:
 
 class ResolveThisBinding final : public Instruction {
 public:
-    explicit ResolveThisBinding(Operand dst)
+    ResolveThisBinding()
         : Instruction(Type::ResolveThisBinding)
-        , m_dst(dst)
     {
     }
 
     ThrowCompletionOr<void> execute_impl(Bytecode::Interpreter&) const;
     ByteString to_byte_string_impl(Bytecode::Executable const&) const;
-    void visit_operands_impl(Function<void(Operand&)> visitor)
-    {
-        visitor(m_dst);
-    }
-
-    Operand dst() const { return m_dst; }
-
-private:
-    Operand m_dst;
+    void visit_operands_impl(Function<void(Operand&)>) { }
 };
 
 class ResolveSuperBase final : public Instruction {
@@ -2538,10 +2623,10 @@ private:
     Operand m_dst;
 };
 
-class TypeofVariable final : public Instruction {
+class TypeofBinding final : public Instruction {
 public:
-    TypeofVariable(Operand dst, IdentifierTableIndex identifier)
-        : Instruction(Type::TypeofVariable)
+    TypeofBinding(Operand dst, IdentifierTableIndex identifier)
+        : Instruction(Type::TypeofBinding)
         , m_dst(dst)
         , m_identifier(identifier)
     {
@@ -2560,6 +2645,7 @@ public:
 private:
     Operand m_dst;
     IdentifierTableIndex m_identifier;
+    mutable EnvironmentCoordinate m_cache;
 };
 
 class End final : public Instruction {

@@ -46,6 +46,7 @@ public:
     [[nodiscard]] ScopedOperand allocate_register();
     [[nodiscard]] ScopedOperand local(u32 local_index);
     [[nodiscard]] ScopedOperand accumulator();
+    [[nodiscard]] ScopedOperand this_value();
 
     void free_register(Register);
 
@@ -261,6 +262,7 @@ public:
     }
 
     bool is_in_finalizer() const { return m_boundaries.contains_slow(BlockBoundaryType::LeaveFinally); }
+    bool must_enter_finalizer() const { return m_boundaries.contains_slow(BlockBoundaryType::ReturnToFinally); }
 
     void generate_break();
     void generate_break(DeprecatedFlyString const& break_label);
@@ -268,12 +270,45 @@ public:
     void generate_continue();
     void generate_continue(DeprecatedFlyString const& continue_label);
 
+    template<typename OpType>
+    void emit_return(ScopedOperand value)
+    requires(IsOneOf<OpType, Op::Return, Op::Yield>)
+    {
+        // FIXME: Tell the call sites about the `saved_return_value` destination
+        //        And take that into account in the movs below.
+        perform_needed_unwinds<OpType>();
+        if (must_enter_finalizer()) {
+            VERIFY(m_current_basic_block->finalizer() != nullptr);
+            // Compare to:
+            // *  Interpreter::do_return
+            // *  Interpreter::run_bytecode::handle_ContinuePendingUnwind
+            // *  Return::execute_impl
+            // *  Yield::execute_impl
+            if constexpr (IsSame<OpType, Op::Yield>)
+                emit<Bytecode::Op::PrepareYield>(Operand(Register::saved_return_value()), value);
+            else
+                emit<Bytecode::Op::Mov>(Operand(Register::saved_return_value()), value);
+            emit<Bytecode::Op::Mov>(Operand(Register::exception()), add_constant(Value {}));
+            // FIXME: Do we really need to clear the return value register here?
+            emit<Bytecode::Op::Mov>(Operand(Register::return_value()), add_constant(Value {}));
+            emit<Bytecode::Op::Jump>(Label { *m_current_basic_block->finalizer() });
+            return;
+        }
+
+        if constexpr (IsSame<OpType, Op::Return>)
+            emit<Op::Return>(value);
+        else
+            emit<Op::Yield>(nullptr, value);
+    }
+
     void start_boundary(BlockBoundaryType type) { m_boundaries.append(type); }
     void end_boundary(BlockBoundaryType type)
     {
         VERIFY(m_boundaries.last() == type);
         m_boundaries.take_last();
     }
+
+    [[nodiscard]] ScopedOperand copy_if_needed_to_preserve_evaluation_order(ScopedOperand const&);
 
     [[nodiscard]] ScopedOperand get_this(Optional<ScopedOperand> preferred_dst = {});
 
@@ -291,16 +326,12 @@ public:
         Yes,
         No,
     };
-    [[nodiscard]] ScopedOperand add_constant(Value value, DeduplicateConstant deduplicate_constant = DeduplicateConstant::Yes)
+    [[nodiscard]] ScopedOperand add_constant(Value);
+
+    [[nodiscard]] Value get_constant(ScopedOperand const& operand) const
     {
-        if (deduplicate_constant == DeduplicateConstant::Yes) {
-            for (size_t i = 0; i < m_constants.size(); ++i) {
-                if (m_constants[i] == value)
-                    return ScopedOperand(*this, Operand(Operand::Type::Constant, i));
-            }
-        }
-        m_constants.append(value);
-        return ScopedOperand(*this, Operand(Operand::Type::Constant, m_constants.size() - 1));
+        VERIFY(operand.operand().is_constant());
+        return m_constants[operand.operand().index()];
     }
 
     UnwindContext const* current_unwind_context() const { return m_current_unwind_context; }
@@ -312,7 +343,7 @@ public:
 private:
     VM& m_vm;
 
-    static CodeGenerationErrorOr<NonnullGCPtr<Executable>> emit_function_body_bytecode(VM&, ASTNode const&, FunctionKind, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion = MustPropagateCompletion::Yes);
+    static CodeGenerationErrorOr<NonnullGCPtr<Executable>> compile(VM&, ASTNode const&, FunctionKind, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion, Vector<DeprecatedFlyString> local_variable_names);
 
     enum class JumpType {
         Continue,
@@ -321,7 +352,7 @@ private:
     void generate_scoped_jump(JumpType);
     void generate_labelled_jump(JumpType, DeprecatedFlyString const& label);
 
-    Generator(VM&, MustPropagateCompletion);
+    Generator(VM&, GCPtr<ECMAScriptFunctionObject const>, MustPropagateCompletion);
     ~Generator() = default;
 
     void grow(size_t);
@@ -344,7 +375,15 @@ private:
     NonnullOwnPtr<RegexTable> m_regex_table;
     MarkedVector<Value> m_constants;
 
+    mutable Optional<ScopedOperand> m_true_constant;
+    mutable Optional<ScopedOperand> m_false_constant;
+    mutable Optional<ScopedOperand> m_null_constant;
+    mutable Optional<ScopedOperand> m_undefined_constant;
+    mutable Optional<ScopedOperand> m_empty_constant;
+    mutable HashMap<i32, ScopedOperand> m_int32_constants;
+
     ScopedOperand m_accumulator;
+    ScopedOperand m_this_value;
     Vector<Register> m_free_registers;
 
     u32 m_next_register { Register::reserved_register_count };
@@ -361,6 +400,8 @@ private:
 
     bool m_finished { false };
     bool m_must_propagate_completion { true };
+
+    GCPtr<ECMAScriptFunctionObject const> m_function;
 };
 
 }

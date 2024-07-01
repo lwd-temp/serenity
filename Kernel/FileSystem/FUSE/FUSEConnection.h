@@ -6,9 +6,11 @@
 
 #pragma once
 
+#include <AK/Atomic.h>
 #include <Kernel/FileSystem/FUSE/Definitions.h>
 #include <Kernel/FileSystem/OpenFileDescription.h>
 #include <Kernel/Library/KBuffer.h>
+#include <Kernel/Tasks/Process.h>
 
 namespace Kernel {
 
@@ -41,10 +43,10 @@ public:
         header->unique = unique;
         header->nodeid = nodeid;
 
-        // FIXME: Fill in proper values for these.
-        header->uid = 0;
-        header->gid = 0;
-        header->pid = 1;
+        auto current_process_credentials = Process::current().credentials();
+        header->uid = current_process_credentials->euid().value();
+        header->gid = current_process_credentials->egid().value();
+        header->pid = Process::current().pid().value();
 
         u8* payload = bit_cast<u8*>(request->data() + sizeof(fuse_in_header));
         memcpy(payload, request_body.data(), request_body.size());
@@ -61,10 +63,11 @@ public:
         if (!m_initialized)
             TRY(handle_init());
 
-        auto request = TRY(create_request(opcode, nodeid, m_unique, request_body));
+        u32 unique = m_unique++;
+        auto request = TRY(create_request(opcode, nodeid, unique, request_body));
         auto response = TRY(device->send_request_and_wait_for_a_reply(m_description, request->bytes()));
 
-        if (validate_response(*response, m_unique++).is_error())
+        if (validate_response(*response, unique).is_error())
             return Error::from_errno(EIO);
 
         return response;
@@ -93,7 +96,7 @@ private:
 
         fuse_out_header* header = bit_cast<fuse_out_header*>(response.data());
         if (header->unique != unique) {
-            dmesgln("FUSE: Received a mismatched request");
+            dmesgln("FUSE: Received a mismatched request (expected #{}, received #{})", unique, header->unique);
             return Error::from_errno(EINVAL);
         }
 
@@ -133,7 +136,7 @@ private:
 
     NonnullRefPtr<OpenFileDescription> m_description;
     bool m_initialized { false };
-    u32 m_unique { 0 };
+    Atomic<u32> m_unique { 0 };
 
     u32 m_major { 0 };
     u32 m_minor { 0 };

@@ -1,8 +1,10 @@
 # Ladybird browser build instructions
 
+**NOTE:** The Ladybird cross-platform web browser project is now separate from SerenityOS, and is now actively developed in the [LadybirdBrowser/ladybird](https://github.com/LadybirdBrowser/ladybird) repository.
+
 ## Build Prerequisites
 
-Qt6 development packages and a C++23 capable compiler are required. g++-12 or clang-17 are required at a minimum for c++23 support.
+Qt6 development packages and a C++23 capable compiler are required. g++-13 or clang-17 are required at a minimum for c++23 support.
 
 NOTE: In all of the below lists of packages, the Qt6 multimedia package is not needed if your Linux system supports PulseAudio.
 
@@ -82,11 +84,6 @@ On Windows:
 WSL2/WSLg are preferred, as they provide a linux environment that matches one of the above distributions.
 MinGW/MSYS2 are not supported, but may work with sufficient elbow grease. Native Windows builds are not supported with either clang-cl or MSVC.
 
-For Android:
-
-On a Unix-like platform, install the prerequisites for that platform and then see the [Android Studio guide](AndroidStudioConfiguration.md).
-Or, download a version of Gradle >= 8.0.0, and run the ``gradlew`` program in ``Ladybird/Android``
-
 ## Build steps
 
 ### Using serenity.sh
@@ -100,11 +97,10 @@ The simplest way to build and run ladybird is via the serenity.sh script:
 ```
 
 The above commands will build Ladybird with one of the following browser chromes, depending on the platform:
-* [Android UI](https://developer.android.com/develop/ui) - The native chrome on Android.
 * [AppKit](https://developer.apple.com/documentation/appkit?language=objc) - The native chrome on macOS.
 * [Qt](https://doc.qt.io/qt-6/) - The chrome used on all other platforms.
 
-The Qt chrome is available on platforms where it is not the default as well (except on Android). To build the
+The Qt chrome is available on platforms where it is not the default as well. To build the
 Qt chrome, install the Qt dependencies for your platform, and enable the Qt chrome via CMake:
 
 ```bash
@@ -147,7 +143,7 @@ The install rules in Ladybird/cmake/InstallRules.cmake define which binaries and
 installed into the configured CMAKE_PREFIX_PATH or path passed to ``cmake --install``.
 
 Note that when using a custom build directory rather than Meta/serenity.sh, the user may need to provide
-a suitable C++ compiler (g++ >= 12, clang >= 14, Apple Clang >= 14.3) via the CMAKE_CXX_COMPILER and
+a suitable C++ compiler (g++ >= 13, clang >= 14, Apple Clang >= 14.3) via the CMAKE_CXX_COMPILER and
 CMAKE_C_COMPILER cmake options.
 
 ```

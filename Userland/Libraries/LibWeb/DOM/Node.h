@@ -140,7 +140,7 @@ public:
 
     WebIDL::ExceptionOr<JS::NonnullGCPtr<Node>> replace_child(JS::NonnullGCPtr<Node> node, JS::NonnullGCPtr<Node> child);
 
-    JS::NonnullGCPtr<Node> clone_node(Document* document = nullptr, bool clone_children = false);
+    WebIDL::ExceptionOr<JS::NonnullGCPtr<Node>> clone_node(Document* document = nullptr, bool clone_children = false);
     WebIDL::ExceptionOr<JS::NonnullGCPtr<Node>> clone_node_binding(bool deep);
 
     // NOTE: This is intended for the JS bindings.
@@ -198,7 +198,7 @@ public:
     virtual void removed_from(Node*);
     virtual void children_changed() { }
     virtual void adopted_from(Document&) { }
-    virtual void cloned(Node&, bool) {};
+    virtual WebIDL::ExceptionOr<void> cloned(Node&, bool) { return {}; }
 
     Layout::Node const* layout_node() const { return m_layout_node; }
     Layout::Node* layout_node() { return m_layout_node; }
@@ -251,6 +251,8 @@ public:
     static Node* from_unique_id(i32);
 
     WebIDL::ExceptionOr<String> serialize_fragment(DOMParsing::RequireWellFormed, FragmentSerializationMode = FragmentSerializationMode::Inner) const;
+
+    WebIDL::ExceptionOr<void> unsafely_set_html(Element&, StringView);
 
     void replace_all(JS::GCPtr<Node>);
     void string_replace_all(String const&);
@@ -555,7 +557,7 @@ public:
     template<typename Callback>
     void for_each_child(Callback callback) const
     {
-        return const_cast<Node*>(this)->template for_each_child(move(callback));
+        return const_cast<Node*>(this)->for_each_child(move(callback));
     }
 
     template<typename Callback>

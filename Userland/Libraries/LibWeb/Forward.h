@@ -92,6 +92,7 @@ class AnglePercentage;
 class AngleStyleValue;
 class BackgroundRepeatStyleValue;
 class BackgroundSizeStyleValue;
+class BasicShapeStyleValue;
 class BorderRadiusStyleValue;
 class CSSAnimation;
 class CSSConditionRule;
@@ -305,6 +306,7 @@ class FetchController;
 class FetchParams;
 class FetchTimingInfo;
 class HeaderList;
+class IncrementalReadLoopReadRequest;
 class Request;
 class Response;
 
@@ -339,15 +341,19 @@ class BrowsingContextGroup;
 class CanvasRenderingContext2D;
 class ClassicScript;
 class CloseEvent;
+class CloseWatcher;
+class CloseWatcherManager;
 class CustomElementDefinition;
 class CustomElementRegistry;
 class DecodedImageData;
 class DocumentState;
 class DOMParser;
 class DOMStringMap;
+class ElementInternals;
 class ErrorEvent;
 class EventHandler;
 class EventLoop;
+class EventSource;
 class FormAssociatedElement;
 class FormDataEvent;
 class History;
@@ -463,6 +469,8 @@ class ToggleEvent;
 class TrackEvent;
 struct TransferDataHolder;
 class TraversableNavigable;
+class UserActivation;
+class ValidityState;
 class VideoTrack;
 class VideoTrackList;
 class Window;
@@ -496,6 +504,12 @@ struct ToggleTaskTracker;
 
 namespace Web::HighResolutionTime {
 class Performance;
+}
+
+namespace Web::IndexedDB {
+class IDBFactory;
+class IDBOpenDBRequest;
+class IDBRequest;
 }
 
 namespace Web::Internals {
@@ -684,12 +698,14 @@ class Table;
 }
 
 namespace Web::WebAudio {
+class AudioBuffer;
 class AudioContext;
 class AudioNode;
 class AudioParam;
 class AudioScheduledSourceNode;
 class BaseAudioContext;
 class DynamicsCompressorNode;
+class GainNode;
 class OfflineAudioContext;
 class OscillatorNode;
 class PeriodicWave;

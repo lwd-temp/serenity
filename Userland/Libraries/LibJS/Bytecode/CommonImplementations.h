@@ -103,19 +103,27 @@ ALWAYS_INLINE ThrowCompletionOr<NonnullGCPtr<Object>> base_object_for_get(VM& vm
     return throw_null_or_undefined_property_access(vm, base_value, base_identifier, property_identifier);
 }
 
+enum class GetByIdMode {
+    Normal,
+    Length,
+};
+
+template<GetByIdMode mode = GetByIdMode::Normal>
 inline ThrowCompletionOr<Value> get_by_id(VM& vm, Optional<DeprecatedFlyString const&> const& base_identifier, DeprecatedFlyString const& property, Value base_value, Value this_value, PropertyLookupCache& cache)
 {
-    if (base_value.is_string()) {
-        auto string_value = TRY(base_value.as_string().get(vm, property));
-        if (string_value.has_value())
-            return *string_value;
+    if constexpr (mode == GetByIdMode::Length) {
+        if (base_value.is_string()) {
+            return Value(base_value.as_string().utf16_string().length_in_code_units());
+        }
     }
 
     auto base_obj = TRY(base_object_for_get(vm, base_value, base_identifier, property));
 
-    // OPTIMIZATION: Fast path for the magical "length" property on Array objects.
-    if (base_obj->has_magical_length_property() && property == vm.names.length.as_string()) {
-        return Value { base_obj->indexed_properties().array_like_size() };
+    if constexpr (mode == GetByIdMode::Length) {
+        // OPTIMIZATION: Fast path for the magical "length" property on Array objects.
+        if (base_obj->has_magical_length_property()) {
+            return Value { base_obj->indexed_properties().array_like_size() };
+        }
     }
 
     auto& shape = base_obj->shape();
@@ -381,24 +389,6 @@ inline ThrowCompletionOr<void> throw_if_needed_for_call(Interpreter& interpreter
     return {};
 }
 
-inline ThrowCompletionOr<Value> typeof_variable(VM& vm, DeprecatedFlyString const& string)
-{
-    // 1. Let val be the result of evaluating UnaryExpression.
-    auto reference = TRY(vm.resolve_binding(string));
-
-    // 2. If val is a Reference Record, then
-    //    a. If IsUnresolvableReference(val) is true, return "undefined".
-    if (reference.is_unresolvable())
-        return PrimitiveString::create(vm, "undefined"_string);
-
-    // 3. Set val to ? GetValue(val).
-    auto value = TRY(reference.get_value(vm));
-
-    // 4. NOTE: This step is replaced in section B.3.6.3.
-    // 5. Return a String according to Table 41.
-    return PrimitiveString::create(vm, value.typeof());
-}
-
 inline Value new_function(VM& vm, FunctionNode const& function_node, Optional<IdentifierTableIndex> const& lhs_name, Optional<Operand> const& home_object)
 {
     Value value;
@@ -409,7 +399,8 @@ inline Value new_function(VM& vm, FunctionNode const& function_node, Optional<Id
             name = vm.bytecode_interpreter().current_executable().get_identifier(lhs_name.value());
         value = function_node.instantiate_ordinary_function_expression(vm, name);
     } else {
-        value = ECMAScriptFunctionObject::create(*vm.current_realm(), function_node.name(), function_node.source_text(), function_node.body(), function_node.parameters(), function_node.function_length(), function_node.local_variables_names(), vm.lexical_environment(), vm.running_execution_context().private_environment, function_node.kind(), function_node.is_strict_mode(), function_node.uses_this(), function_node.might_need_arguments_object(), function_node.contains_direct_call_to_eval(), function_node.is_arrow_function());
+        value = ECMAScriptFunctionObject::create(*vm.current_realm(), function_node.name(), function_node.source_text(), function_node.body(), function_node.parameters(), function_node.function_length(), function_node.local_variables_names(), vm.lexical_environment(), vm.running_execution_context().private_environment, function_node.kind(), function_node.is_strict_mode(),
+            function_node.parsing_insights(), function_node.is_arrow_function());
     }
 
     if (home_object.has_value()) {

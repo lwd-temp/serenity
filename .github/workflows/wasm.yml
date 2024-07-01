@@ -33,7 +33,7 @@ jobs:
       - name: "Install emscripten"
         uses: mymindstorm/setup-emsdk@v14
         with:
-          version: 3.1.25
+          version: 3.1.61
 
       - name: Restore Caches
         uses: ./.github/actions/cache-restore
@@ -93,7 +93,7 @@ jobs:
           tar --exclude='.[^/]*' -czvf libjs-wasm.tar.gz -C ${{ github.workspace }}/libjs-data .
 
       - name: Deploy to GitHub
-        uses: JamesIves/github-pages-deploy-action@v4.6.0
+        uses: JamesIves/github-pages-deploy-action@v4.6.1
         if: github.ref == 'refs/heads/master'
         with:
           git-config-name: BuggieBot

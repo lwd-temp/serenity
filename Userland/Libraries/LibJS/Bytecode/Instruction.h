@@ -57,6 +57,8 @@
     O(GetGlobal)                       \
     O(GetImportMeta)                   \
     O(GetIterator)                     \
+    O(GetLength)                       \
+    O(GetLengthWithThis)               \
     O(GetMethod)                       \
     O(GetNewTarget)                    \
     O(GetNextMethodFromIteratorRecord) \
@@ -110,6 +112,7 @@
     O(NewRegExp)                       \
     O(NewTypeError)                    \
     O(Not)                             \
+    O(PrepareYield)                    \
     O(PostfixDecrement)                \
     O(PostfixIncrement)                \
     O(PutById)                         \
@@ -135,7 +138,7 @@
     O(ThrowIfNullish)                  \
     O(ThrowIfTDZ)                      \
     O(Typeof)                          \
-    O(TypeofVariable)                  \
+    O(TypeofBinding)                   \
     O(UnaryMinus)                      \
     O(UnaryPlus)                       \
     O(UnsignedRightShift)              \

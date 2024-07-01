@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2024, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2022-2023, San Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -28,7 +28,6 @@
 #include <LibWeb/DOM/NamedNodeMap.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/DOM/Text.h>
-#include <LibWeb/DOMParsing/InnerHTML.h>
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/Geometry/DOMRectList.h>
 #include <LibWeb/HTML/BrowsingContext.h>
@@ -49,6 +48,7 @@
 #include <LibWeb/HTML/HTMLSlotElement.h>
 #include <LibWeb/HTML/HTMLStyleElement.h>
 #include <LibWeb/HTML/HTMLTableElement.h>
+#include <LibWeb/HTML/HTMLTemplateElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
@@ -593,25 +593,33 @@ DOMTokenList* Element::class_list()
     return m_class_list;
 }
 
-// https://dom.spec.whatwg.org/#dom-element-attachshadow
-WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowRootInit init)
+// https://dom.spec.whatwg.org/#valid-shadow-host-name
+static bool is_valid_shadow_host_name(FlyString const& name)
 {
-    // 1. If this’s namespace is not the HTML namespace, then throw a "NotSupportedError" DOMException.
+    // A valid shadow host name is:
+    // - a valid custom element name
+    // - "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", or "span"
+    if (!HTML::is_valid_custom_element_name(name)
+        && !name.is_one_of("article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span")) {
+        return false;
+    }
+    return true;
+}
+
+// https://dom.spec.whatwg.org/#concept-attach-a-shadow-root
+WebIDL::ExceptionOr<void> Element::attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment)
+{
+    // 1. If element’s namespace is not the HTML namespace, then throw a "NotSupportedError" DOMException.
     if (namespace_uri() != Namespace::HTML)
         return WebIDL::NotSupportedError::create(realm(), "Element's namespace is not the HTML namespace"_fly_string);
 
-    // 2. If this’s local name is not one of the following:
-    //    - a valid custom element name
-    //    - "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", or "span"
-    if (!HTML::is_valid_custom_element_name(local_name())
-        && !local_name().is_one_of("article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span")) {
-        // then throw a "NotSupportedError" DOMException.
-        return WebIDL::NotSupportedError::create(realm(), MUST(String::formatted("Element '{}' cannot be a shadow host", local_name())));
-    }
+    // 2. If element’s local name is not a valid shadow host name, then throw a "NotSupportedError" DOMException.
+    if (!is_valid_shadow_host_name(local_name()))
+        return WebIDL::NotSupportedError::create(realm(), "Element's local name is not a valid shadow host name"_fly_string);
 
-    // 3. If this’s local name is a valid custom element name, or this’s is value is not null, then:
+    // 3. If element’s local name is a valid custom element name, or element’s is value is not null, then:
     if (HTML::is_valid_custom_element_name(local_name()) || m_is_value.has_value()) {
-        // 1. Let definition be the result of looking up a custom element definition given this’s node document, its namespace, its local name, and its is value.
+        // 1. Let definition be the result of looking up a custom element definition given element’s node document, its namespace, its local name, and its is value.
         auto definition = document().lookup_custom_element_definition(namespace_uri(), local_name(), m_is_value);
 
         // 2. If definition is not null and definition’s disable shadow is true, then throw a "NotSupportedError" DOMException.
@@ -619,32 +627,69 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowR
             return WebIDL::NotSupportedError::create(realm(), "Cannot attach a shadow root to a custom element that has disabled shadow roots"_fly_string);
     }
 
-    // 4. If this is a shadow host, then throw an "NotSupportedError" DOMException.
-    if (is_shadow_host())
-        return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_fly_string);
+    // 4. If element is a shadow host, then:
+    if (is_shadow_host()) {
+        // 1. Let currentShadowRoot be element’s shadow root.
+        auto current_shadow_root = shadow_root();
 
-    // 5. Let shadow be a new shadow root whose node document is this’s node document, host is this, and mode is init["mode"].
-    auto shadow = heap().allocate<ShadowRoot>(realm(), document(), *this, init.mode);
+        // 2. If any of the following are true:
+        // - currentShadowRoot’s declarative is false; or
+        // - currentShadowRoot’s mode is not mode,
+        // then throw a "NotSupportedError" DOMException.
+        if (!current_shadow_root->declarative() || current_shadow_root->mode() != mode) {
+            return WebIDL::NotSupportedError::create(realm(), "Element already is a shadow host"_fly_string);
+        }
 
-    // 6. Set shadow’s delegates focus to init["delegatesFocus"].
-    shadow->set_delegates_focus(init.delegates_focus);
+        // 3. Otherwise:
+        //    1. Remove all of currentShadowRoot’s children, in tree order.
+        current_shadow_root->remove_all_children();
 
-    // 7. If this’s custom element state is "precustomized" or "custom", then set shadow’s available to element internals to true.
+        //    2. Set currentShadowRoot’s declarative to false.
+        current_shadow_root->set_declarative(false);
+
+        //    3. Return.
+        return {};
+    }
+
+    // 5. Let shadow be a new shadow root whose node document is element’s node document, host is this, and mode is mode.
+    auto shadow = heap().allocate<ShadowRoot>(realm(), document(), *this, mode);
+
+    // 6. Set shadow’s delegates focus to delegatesFocus".
+    shadow->set_delegates_focus(delegates_focus);
+
+    // 7. If element’s custom element state is "precustomized" or "custom", then set shadow’s available to element internals to true.
     if (m_custom_element_state == CustomElementState::Precustomized || m_custom_element_state == CustomElementState::Custom)
         shadow->set_available_to_element_internals(true);
 
-    // 8. Set shadow’s slot assignment to init["slotAssignment"].
-    shadow->set_slot_assignment(init.slot_assignment);
+    // 8. Set shadow’s slot assignment to slotAssignment.
+    shadow->set_slot_assignment(slot_assignment);
 
-    // 9. Set this’s shadow root to shadow.
+    // 9. Set shadow’s declarative to false.
+    shadow->set_declarative(false);
+
+    // 10. Set shadow’s clonable to clonable.
+    shadow->set_clonable(clonable);
+
+    // 11. Set shadow’s serializable to serializable.
+    shadow->set_serializable(serializable);
+
+    // 12. Set element’s shadow root to shadow.
     set_shadow_root(shadow);
+    return {};
+}
 
-    // 10. Return shadow.
-    return shadow;
+// https://dom.spec.whatwg.org/#dom-element-attachshadow
+WebIDL::ExceptionOr<JS::NonnullGCPtr<ShadowRoot>> Element::attach_shadow(ShadowRootInit init)
+{
+    // 1. Run attach a shadow root with this, init["mode"], init["clonable"], init["serializable"], init["delegatesFocus"], and init["slotAssignment"].
+    TRY(attach_a_shadow_root(init.mode, init.clonable, init.serializable, init.delegates_focus, init.slot_assignment));
+
+    // 2. Return this’s shadow root.
+    return JS::NonnullGCPtr { *shadow_root() };
 }
 
 // https://dom.spec.whatwg.org/#dom-element-shadowroot
-JS::GCPtr<ShadowRoot> Element::shadow_root() const
+JS::GCPtr<ShadowRoot> Element::shadow_root_for_bindings() const
 {
     // 1. Let shadow be this’s shadow root.
     auto shadow = m_shadow_root;
@@ -709,13 +754,38 @@ WebIDL::ExceptionOr<DOM::Element const*> Element::closest(StringView selectors) 
     return nullptr;
 }
 
-WebIDL::ExceptionOr<void> Element::set_inner_html(StringView markup)
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-innerhtml
+WebIDL::ExceptionOr<void> Element::set_inner_html(StringView value)
 {
-    TRY(DOMParsing::inner_html_setter(*this, markup));
+    // FIXME: 1. Let compliantString be the result of invoking the Get Trusted Type compliant string algorithm with TrustedHTML, this's relevant global object, the given value, "Element innerHTML", and "script".
+
+    // 2. Let context be this.
+    DOM::Node* context = this;
+
+    // 3. Let fragment be the result of invoking the fragment parsing algorithm steps with context and compliantString. FIXME: Use compliantString.
+    auto fragment = TRY(verify_cast<Element>(*context).parse_fragment(value));
+
+    // 4. If context is a template element, then set context to the template element's template contents (a DocumentFragment).
+    if (is<HTML::HTMLTemplateElement>(*context))
+        context = verify_cast<HTML::HTMLTemplateElement>(*context).content();
+
+    // 5. Replace all with fragment within context.
+    context->replace_all(fragment);
+
+    // NOTE: We don't invalidate style & layout for <template> elements since they don't affect rendering.
+    if (!is<HTML::HTMLTemplateElement>(*context)) {
+        context->set_needs_style_update(true);
+
+        if (context->is_connected()) {
+            // NOTE: Since the DOM has changed, we have to rebuild the layout tree.
+            context->document().invalidate_layout();
+        }
+    }
+
     return {};
 }
 
-// https://w3c.github.io/DOM-Parsing/#dom-innerhtml-innerhtml
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-innerhtml
 WebIDL::ExceptionOr<String> Element::inner_html() const
 {
     return serialize_fragment(DOMParsing::RequireWellFormed::Yes);
@@ -1417,6 +1487,32 @@ bool Element::is_actually_disabled() const
     return false;
 }
 
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#fragment-parsing-algorithm-steps
+WebIDL::ExceptionOr<JS::NonnullGCPtr<DOM::DocumentFragment>> Element::parse_fragment(StringView markup)
+{
+    // 1. Let algorithm be the HTML fragment parsing algorithm.
+    auto algorithm = HTML::HTMLParser::parse_html_fragment;
+
+    // FIXME: 2. If context's node document is an XML document, then set algorithm to the XML fragment parsing algorithm.
+    if (document().is_xml_document()) {
+        dbgln("FIXME: Handle fragment parsing of XML documents");
+    }
+
+    // 3. Let new children be the result of invoking algorithm given markup, with context set to context.
+    auto new_children = algorithm(*this, markup, HTML::HTMLParser::AllowDeclarativeShadowRoots::No);
+
+    // 4. Let fragment be a new DocumentFragment whose node document is context's node document.
+    auto fragment = realm().heap().allocate<DOM::DocumentFragment>(realm(), document());
+
+    // 5. Append each Node in new children to fragment (in tree order).
+    for (auto& child : new_children) {
+        // I don't know if this can throw here, but let's be safe.
+        (void)TRY(fragment->append_child(*child));
+    }
+
+    return fragment;
+}
+
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-outerhtml
 WebIDL::ExceptionOr<String> Element::outer_html() const
 {
@@ -1426,23 +1522,25 @@ WebIDL::ExceptionOr<String> Element::outer_html() const
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-outerhtml
 WebIDL::ExceptionOr<void> Element::set_outer_html(String const& value)
 {
-    // 1. Let parent be this's parent.
+    // 1. FIXME: Let compliantString be the result of invoking the Get Trusted Type compliant string algorithm with TrustedHTML, this's relevant global object, the given value, "Element outerHTML", and "script".
+
+    // 2. Let parent be this's parent.
     auto* parent = this->parent();
 
-    // 2. If parent is null, return. There would be no way to obtain a reference to the nodes created even if the remaining steps were run.
+    // 3. If parent is null, return. There would be no way to obtain a reference to the nodes created even if the remaining steps were run.
     if (!parent)
         return {};
 
-    // 3. If parent is a Document, throw a "NoModificationAllowedError" DOMException.
+    // 4. If parent is a Document, throw a "NoModificationAllowedError" DOMException.
     if (parent->is_document())
         return WebIDL::NoModificationAllowedError::create(realm(), "Cannot set outer HTML on document"_fly_string);
 
-    // 4. If parent is a DocumentFragment, set parent to the result of creating an element given this's node document, body, and the HTML namespace.
+    // 5. If parent is a DocumentFragment, set parent to the result of creating an element given this's node document, body, and the HTML namespace.
     if (parent->is_document_fragment())
         parent = TRY(create_element(document(), HTML::TagNames::body, Namespace::HTML));
 
-    // 5. Let fragment be the result of invoking the fragment parsing algorithm steps given parent and the given value.
-    auto fragment = TRY(DOMParsing::parse_fragment(value, verify_cast<Element>(*parent)));
+    // 6. Let fragment be the result of invoking the fragment parsing algorithm steps given parent and compliantString. FIXME: Use compliantString.
+    auto fragment = TRY(verify_cast<Element>(*parent).parse_fragment(value));
 
     // 6. Replace this with fragment within this's parent.
     TRY(parent->replace_child(fragment, *this));
@@ -1450,19 +1548,21 @@ WebIDL::ExceptionOr<void> Element::set_outer_html(String const& value)
     return {};
 }
 
-// https://w3c.github.io/DOM-Parsing/#dom-element-insertadjacenthtml
-WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, String const& text)
+// https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#the-insertadjacenthtml()-method
+WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, String const& string)
 {
+    // 1. Let context be null.
     JS::GCPtr<Node> context;
-    // 1. Use the first matching item from this list:
+
+    // 2. Use the first matching item from this list:
     // - If position is an ASCII case-insensitive match for the string "beforebegin"
     // - If position is an ASCII case-insensitive match for the string "afterend"
     if (Infra::is_ascii_case_insensitive_match(position, "beforebegin"sv)
         || Infra::is_ascii_case_insensitive_match(position, "afterend"sv)) {
-        // Let context be the context object's parent.
+        // 1. Set context to this's parent.
         context = this->parent();
 
-        // If context is null or a Document, throw a "NoModificationAllowedError" DOMException.
+        // 2. If context is null or a Document, throw a "NoModificationAllowedError" DOMException.
         if (!context || context->is_document())
             return WebIDL::NoModificationAllowedError::create(realm(), "insertAdjacentHTML: context is null or a Document"_fly_string);
     }
@@ -1470,7 +1570,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
     // - If position is an ASCII case-insensitive match for the string "beforeend"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterbegin"sv)
         || Infra::is_ascii_case_insensitive_match(position, "beforeend"sv)) {
-        // Let context be the context object.
+        // Set context to this.
         context = this;
     }
     // Otherwise
@@ -1479,7 +1579,7 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
         return WebIDL::SyntaxError::create(realm(), "insertAdjacentHTML: invalid position argument"_fly_string);
     }
 
-    // 2. If context is not an Element or the following are all true:
+    // 3. If context is not an Element or the following are all true:
     //    - context's node document is an HTML document,
     //    - context's local name is "html", and
     //    - context's namespace is the HTML namespace;
@@ -1487,39 +1587,35 @@ WebIDL::ExceptionOr<void> Element::insert_adjacent_html(String const& position, 
         || (context->document().document_type() == Document::Type::HTML
             && static_cast<Element const&>(*context).local_name() == "html"sv
             && static_cast<Element const&>(*context).namespace_uri() == Namespace::HTML)) {
-        // FIXME: let context be a new Element with
-        //        - body as its local name,
-        //        - The HTML namespace as its namespace, and
-        //        - The context object's node document as its node document.
-        TODO();
+        context = TRY(create_element(document(), HTML::TagNames::body, Namespace::HTML));
     }
 
-    // 3. Let fragment be the result of invoking the fragment parsing algorithm with text as markup, and context as the context element.
-    auto fragment = TRY(DOMParsing::parse_fragment(text, verify_cast<Element>(*context)));
+    // 4. Let fragment be the result of invoking the fragment parsing algorithm steps with context and string.
+    auto fragment = TRY(verify_cast<Element>(*context).parse_fragment(string));
 
-    // 4. Use the first matching item from this list:
+    // 5. Use the first matching item from this list:
 
     // - If position is an ASCII case-insensitive match for the string "beforebegin"
     if (Infra::is_ascii_case_insensitive_match(position, "beforebegin"sv)) {
-        // Insert fragment into the context object's parent before the context object.
+        // Insert fragment into this's parent before this.
         parent()->insert_before(fragment, this);
     }
 
     // - If position is an ASCII case-insensitive match for the string "afterbegin"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterbegin"sv)) {
-        // Insert fragment into the context object before its first child.
+        // Insert fragment into this before its first child.
         insert_before(fragment, first_child());
     }
 
     // - If position is an ASCII case-insensitive match for the string "beforeend"
     else if (Infra::is_ascii_case_insensitive_match(position, "beforeend"sv)) {
-        // Append fragment to the context object.
+        // Append fragment to this.
         TRY(append_child(fragment));
     }
 
     // - If position is an ASCII case-insensitive match for the string "afterend"
     else if (Infra::is_ascii_case_insensitive_match(position, "afterend"sv)) {
-        // Insert fragment into the context object's parent before the context object's next sibling.
+        // Insert fragment into this's parent before this's next sibling.
         parent()->insert_before(fragment, next_sibling());
     }
     return {};
@@ -1672,7 +1768,7 @@ static ErrorOr<void> scroll_an_element_into_view(DOM::Element& target, Bindings:
             }
             // 3. Otherwise, if block is "center", then align the center of target bounding border box with the center of scrolling box in scrolling box’s block flow direction.
             else if (block == Bindings::ScrollLogicalPosition::Center) {
-                TODO();
+                y = element_edge_a + (element_height / 2) - (scrolling_box_height / 2);
             }
             // 4. Otherwise, block is "nearest":
             else {
@@ -2375,7 +2471,9 @@ Optional<Element::Directionality> Element::auto_directionality() const
 
     // 1. If element is an auto-directionality form-associated element:
     if (is_auto_directionality_form_associated_element()) {
-        auto const& value = static_cast<HTML::HTMLInputElement const&>(*this).value();
+        auto const* form_associated_element = dynamic_cast<HTML::FormAssociatedElement const*>(this);
+        VERIFY(form_associated_element);
+        auto const& value = form_associated_element->value();
 
         // 1. If element's value contains a character of bidirectional character type AL or R,
         //    and there is no character of bidirectional character type L anywhere before it in the element's value, then return 'rtl'.
@@ -2544,6 +2642,34 @@ CSS::StyleSheetList& Element::document_or_shadow_root_style_sheets()
         return static_cast<DOM::ShadowRoot&>(root_node).style_sheets();
 
     return document().style_sheets();
+}
+
+// https://html.spec.whatwg.org/#dom-element-gethtml
+WebIDL::ExceptionOr<String> Element::get_html(GetHTMLOptions const& options) const
+{
+    // Element's getHTML(options) method steps are to return the result
+    // of HTML fragment serialization algorithm with this,
+    // options["serializableShadowRoots"], and options["shadowRoots"].
+    return HTML::HTMLParser::serialize_html_fragment(
+        *this,
+        options.serializable_shadow_roots ? HTML::HTMLParser::SerializableShadowRoots::Yes : HTML::HTMLParser::SerializableShadowRoots::No,
+        options.shadow_roots);
+}
+
+// https://html.spec.whatwg.org/#dom-element-sethtmlunsafe
+WebIDL::ExceptionOr<void> Element::set_html_unsafe(StringView html)
+{
+    // FIXME: 1. Let compliantHTML be the result of invoking the Get Trusted Type compliant string algorithm with TrustedHTML, this's relevant global object, html, "Element setHTMLUnsafe", and "script".
+
+    // 2. Let target be this's template contents if this is a template element; otherwise this.
+    DOM::Node* target = this;
+    if (is<HTML::HTMLTemplateElement>(*this))
+        target = verify_cast<HTML::HTMLTemplateElement>(*this).content().ptr();
+
+    // 3. Unsafe set HTML given target, this, and compliantHTML. FIXME: Use compliantHTML.
+    TRY(target->unsafely_set_html(*this, html));
+
+    return {};
 }
 
 }

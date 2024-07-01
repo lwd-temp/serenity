@@ -75,6 +75,56 @@ public:
 
     [[nodiscard]] LengthOrCalculated parse_as_sizes_attribute();
 
+    // https://html.spec.whatwg.org/multipage/semantics-other.html#case-sensitivity-of-selectors
+    static constexpr Array case_insensitive_html_attributes = {
+        "accept"sv,
+        "accept-charset"sv,
+        "align"sv,
+        "alink"sv,
+        "axis"sv,
+        "bgcolor"sv,
+        "charset"sv,
+        "checked"sv,
+        "clear"sv,
+        "codetype"sv,
+        "color"sv,
+        "compact"sv,
+        "declare"sv,
+        "defer"sv,
+        "dir"sv,
+        "direction"sv,
+        "disabled"sv,
+        "enctype"sv,
+        "face"sv,
+        "frame"sv,
+        "hreflang"sv,
+        "http-equiv"sv,
+        "lang"sv,
+        "language"sv,
+        "link"sv,
+        "media"sv,
+        "method"sv,
+        "multiple"sv,
+        "nohref"sv,
+        "noresize"sv,
+        "noshade"sv,
+        "nowrap"sv,
+        "readonly"sv,
+        "rel"sv,
+        "rev"sv,
+        "rules"sv,
+        "scope"sv,
+        "scrolling"sv,
+        "selected"sv,
+        "shape"sv,
+        "target"sv,
+        "text"sv,
+        "type"sv,
+        "valign"sv,
+        "valuetype"sv,
+        "vlink"sv,
+    };
+
 private:
     Parser(ParsingContext const&, Vector<Token>);
 
@@ -202,6 +252,9 @@ private:
 
     Optional<URL::URL> parse_url_function(ComponentValue const&);
     RefPtr<StyleValue> parse_url_value(TokenStream<ComponentValue>&);
+
+    RefPtr<StyleValue> parse_basic_shape_function(ComponentValue const&);
+    RefPtr<StyleValue> parse_basic_shape_value(TokenStream<ComponentValue>&);
 
     template<typename TElement>
     Optional<Vector<TElement>> parse_color_stop_list(TokenStream<ComponentValue>& tokens, auto is_position, auto get_position);

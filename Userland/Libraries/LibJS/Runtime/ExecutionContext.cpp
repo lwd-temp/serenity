@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2024, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2022, Luke Wilde <lukew@serenityos.org>
  *
@@ -13,13 +13,37 @@
 
 namespace JS {
 
-NonnullOwnPtr<ExecutionContext> ExecutionContext::create(Heap& heap)
+class ExecutionContextAllocator {
+public:
+    NonnullOwnPtr<ExecutionContext> allocate()
+    {
+        if (m_execution_contexts.is_empty())
+            return adopt_own(*new ExecutionContext);
+        void* slot = m_execution_contexts.take_last();
+        return adopt_own(*new (slot) ExecutionContext);
+    }
+    void deallocate(void* ptr)
+    {
+        m_execution_contexts.append(ptr);
+    }
+
+private:
+    Vector<void*> m_execution_contexts;
+};
+
+static NeverDestroyed<ExecutionContextAllocator> s_execution_context_allocator;
+
+NonnullOwnPtr<ExecutionContext> ExecutionContext::create()
 {
-    return adopt_own(*new ExecutionContext(heap));
+    return s_execution_context_allocator->allocate();
 }
 
-ExecutionContext::ExecutionContext(Heap& heap)
-    : m_heap(heap)
+void ExecutionContext::operator delete(void* ptr)
+{
+    s_execution_context_allocator->deallocate(ptr);
+}
+
+ExecutionContext::ExecutionContext()
 {
 }
 
@@ -29,7 +53,7 @@ ExecutionContext::~ExecutionContext()
 
 NonnullOwnPtr<ExecutionContext> ExecutionContext::copy() const
 {
-    auto copy = create(m_heap);
+    auto copy = create();
     copy->function = function;
     copy->realm = realm;
     copy->script_or_module = script_or_module;

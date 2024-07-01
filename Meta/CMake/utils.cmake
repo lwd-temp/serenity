@@ -180,7 +180,7 @@ function(remove_path_if_version_changed version version_file cache_path)
     endif()
 endfunction()
 
-function(invoke_generator name generator version_file header implementation)
+function(invoke_generator name generator primary_source header implementation)
     cmake_parse_arguments(invoke_generator "" "" "arguments;dependencies" ${ARGN})
 
     add_custom_command(
@@ -190,7 +190,7 @@ function(invoke_generator name generator version_file header implementation)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${implementation}.tmp" "${implementation}"
         COMMAND "${CMAKE_COMMAND}" -E remove "${header}.tmp" "${implementation}.tmp"
         VERBATIM
-        DEPENDS ${generator} ${invoke_generator_dependencies} "${version_file}"
+        DEPENDS ${generator} ${invoke_generator_dependencies} "${primary_source}"
     )
 
     add_custom_target("generate_${name}" DEPENDS "${header}" "${implementation}")
@@ -200,24 +200,33 @@ function(invoke_generator name generator version_file header implementation)
 endfunction()
 
 function(download_file_multisource urls path)
+    cmake_parse_arguments(DOWNLOAD "" "SHA256" "" ${ARGN})
+
+    if (NOT "${DOWNLOAD_SHA256}" STREQUAL "")
+        set(DOWNLOAD_SHA256 EXPECTED_HASH "SHA256=${DOWNLOAD_SHA256}")
+    endif()
+
     if (NOT EXISTS "${path}")
         if (NOT ENABLE_NETWORK_DOWNLOADS)
             message(FATAL_ERROR "${path} does not exist, and unable to download it")
         endif()
+
         get_filename_component(file "${path}" NAME)
+        set(tmp_path "${path}.tmp")
 
         foreach(url ${urls})
             message(STATUS "Downloading file ${file} from ${url}")
 
-            file(DOWNLOAD "${url}" "${path}" INACTIVITY_TIMEOUT 10 STATUS download_result)
+            file(DOWNLOAD "${url}" "${tmp_path}" INACTIVITY_TIMEOUT 10 STATUS download_result ${DOWNLOAD_SHA256})
             list(GET download_result 0 status_code)
             list(GET download_result 1 error_message)
 
             if (status_code EQUAL 0)
+                file(RENAME "${tmp_path}" "${path}")
                 break()
             endif()
 
-            file(REMOVE "${path}")
+            file(REMOVE "${tmp_path}")
             message(WARNING "Failed to download ${url}: ${error_message}")
         endforeach()
 
@@ -228,8 +237,10 @@ function(download_file_multisource urls path)
 endfunction()
 
 function(download_file url path)
+    cmake_parse_arguments(DOWNLOAD "" "SHA256" "" ${ARGN})
+
     # If the timestamp doesn't match exactly, the Web Archive should redirect to the closest archived file automatically.
-    download_file_multisource("${url};https://web.archive.org/web/99991231235959/${url}" "${path}")
+    download_file_multisource("${url};https://web.archive.org/web/99991231235959/${url}" "${path}" SHA256 "${DOWNLOAD_SHA256}")
 endfunction()
 
 function(extract_path dest_dir zip_path source_path dest_path)

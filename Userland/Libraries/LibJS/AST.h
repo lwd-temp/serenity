@@ -693,9 +693,11 @@ struct FunctionParameter {
     Handle<Bytecode::Executable> bytecode_executable {};
 };
 
-enum class UsesThis {
-    Yes,
-    No
+struct FunctionParsingInsights {
+    bool uses_this { false };
+    bool uses_this_from_environment { false };
+    bool contains_direct_call_to_eval { false };
+    bool might_need_arguments_object { false };
 };
 
 class FunctionNode {
@@ -708,11 +710,12 @@ public:
     i32 function_length() const { return m_function_length; }
     Vector<DeprecatedFlyString> const& local_variables_names() const { return m_local_variables_names; }
     bool is_strict_mode() const { return m_is_strict_mode; }
-    bool might_need_arguments_object() const { return m_might_need_arguments_object; }
-    bool contains_direct_call_to_eval() const { return m_contains_direct_call_to_eval; }
+    bool might_need_arguments_object() const { return m_parsing_insights.might_need_arguments_object; }
+    bool contains_direct_call_to_eval() const { return m_parsing_insights.contains_direct_call_to_eval; }
     bool is_arrow_function() const { return m_is_arrow_function; }
+    FunctionParsingInsights const& parsing_insights() const { return m_parsing_insights; }
     FunctionKind kind() const { return m_kind; }
-    UsesThis uses_this() const { return m_uses_this; }
+    bool uses_this_from_environment() const { return m_parsing_insights.uses_this_from_environment; }
 
     virtual bool has_name() const = 0;
     virtual Value instantiate_ordinary_function_expression(VM&, DeprecatedFlyString given_name) const = 0;
@@ -720,7 +723,7 @@ public:
     virtual ~FunctionNode() {};
 
 protected:
-    FunctionNode(RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, bool might_need_arguments_object, bool contains_direct_call_to_eval, bool is_arrow_function, Vector<DeprecatedFlyString> local_variables_names, UsesThis uses_this)
+    FunctionNode(RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, FunctionParsingInsights parsing_insights, bool is_arrow_function, Vector<DeprecatedFlyString> local_variables_names)
         : m_name(move(name))
         , m_source_text(move(source_text))
         , m_body(move(body))
@@ -728,14 +731,12 @@ protected:
         , m_function_length(function_length)
         , m_kind(kind)
         , m_is_strict_mode(is_strict_mode)
-        , m_might_need_arguments_object(might_need_arguments_object)
-        , m_contains_direct_call_to_eval(contains_direct_call_to_eval)
         , m_is_arrow_function(is_arrow_function)
-        , m_uses_this(uses_this)
+        , m_parsing_insights(parsing_insights)
         , m_local_variables_names(move(local_variables_names))
     {
         if (m_is_arrow_function)
-            VERIFY(!m_might_need_arguments_object);
+            VERIFY(!parsing_insights.might_need_arguments_object);
     }
 
     void dump(int indent, ByteString const& class_name) const;
@@ -749,10 +750,8 @@ private:
     i32 const m_function_length;
     FunctionKind m_kind;
     bool m_is_strict_mode : 1 { false };
-    bool m_might_need_arguments_object : 1 { false };
-    bool m_contains_direct_call_to_eval : 1 { false };
     bool m_is_arrow_function : 1 { false };
-    UsesThis m_uses_this : 1 { UsesThis::No };
+    FunctionParsingInsights m_parsing_insights;
 
     Vector<DeprecatedFlyString> m_local_variables_names;
 };
@@ -763,9 +762,9 @@ class FunctionDeclaration final
 public:
     static bool must_have_name() { return true; }
 
-    FunctionDeclaration(SourceRange source_range, RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, bool might_need_arguments_object, bool contains_direct_call_to_eval, Vector<DeprecatedFlyString> local_variables_names, UsesThis uses_this)
+    FunctionDeclaration(SourceRange source_range, RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, FunctionParsingInsights insights, Vector<DeprecatedFlyString> local_variables_names)
         : Declaration(move(source_range))
-        , FunctionNode(move(name), move(source_text), move(body), move(parameters), function_length, kind, is_strict_mode, might_need_arguments_object, contains_direct_call_to_eval, false, move(local_variables_names), uses_this)
+        , FunctionNode(move(name), move(source_text), move(body), move(parameters), function_length, kind, is_strict_mode, insights, false, move(local_variables_names))
     {
     }
 
@@ -793,9 +792,9 @@ class FunctionExpression final
 public:
     static bool must_have_name() { return false; }
 
-    FunctionExpression(SourceRange source_range, RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, bool might_need_arguments_object, bool contains_direct_call_to_eval, Vector<DeprecatedFlyString> local_variables_names, UsesThis uses_this = UsesThis::No, bool is_arrow_function = false)
+    FunctionExpression(SourceRange source_range, RefPtr<Identifier const> name, ByteString source_text, NonnullRefPtr<Statement const> body, Vector<FunctionParameter> parameters, i32 function_length, FunctionKind kind, bool is_strict_mode, FunctionParsingInsights insights, Vector<DeprecatedFlyString> local_variables_names, bool is_arrow_function = false)
         : Expression(move(source_range))
-        , FunctionNode(move(name), move(source_text), move(body), move(parameters), function_length, kind, is_strict_mode, might_need_arguments_object, contains_direct_call_to_eval, is_arrow_function, move(local_variables_names), uses_this)
+        , FunctionNode(move(name), move(source_text), move(body), move(parameters), function_length, kind, is_strict_mode, insights, is_arrow_function, move(local_variables_names))
     {
     }
 

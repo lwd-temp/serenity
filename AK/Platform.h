@@ -57,6 +57,10 @@
 #    define AK_COMPILER_GCC
 #endif
 
+#if defined(AK_COMPILER_CLANG) && defined(__apple_build_version__)
+#    define AK_COMPILER_APPLE_CLANG
+#endif
+
 #if defined(__GLIBC__)
 #    define AK_LIBC_GLIBC
 #    define AK_LIBC_GLIBC_PREREQ(maj, min) __GLIBC_PREREQ((maj), (min))
@@ -123,18 +127,6 @@
 #    define AK_OS_WINDOWS
 #endif
 
-#if defined(__ANDROID__)
-#    define STR(x) __STR(x)
-#    define __STR(x) #x
-#    if __ANDROID_API__ < 30
-#        pragma message "Invalid android API " STR(__ANDROID_API__)
-#        error "Build configuration not tested on configured Android API version"
-#    endif
-#    undef STR
-#    undef __STR
-#    define AK_OS_ANDROID
-#endif
-
 #if defined(__EMSCRIPTEN__)
 #    define AK_OS_EMSCRIPTEN
 #endif
@@ -164,6 +156,16 @@
 // issue also caused by it: https://gitlab.com/qemu-project/qemu/-/issues/1659#note_1408275831
 #if ARCH(AARCH64) && defined(__apple_build_version__) && __clang_major__ == 14
 #    define AK_BUILTIN_SUBC_BROKEN
+#endif
+
+#if defined(AK_COMPILER_CLANG) && __clang_major__ < 19
+#    define AK_COROUTINE_DESTRUCTION_BROKEN
+#endif
+
+#ifdef AK_COMPILER_GCC
+// FIXME: Reduce and report these to GCC.
+#    define AK_COROUTINE_STATEMENT_EXPRS_BROKEN
+#    define AK_COROUTINE_TYPE_DEDUCTION_BROKEN
 #endif
 
 #ifdef ALWAYS_INLINE

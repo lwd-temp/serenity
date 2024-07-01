@@ -40,7 +40,7 @@ struct Oklab {
 
 class Color {
 public:
-    enum NamedColor {
+    enum class NamedColor {
         Transparent,
         Black,
         White,
@@ -65,6 +65,8 @@ public:
         MidMagenta,
         LightBlue,
     };
+
+    using enum NamedColor;
 
     constexpr Color() = default;
     constexpr Color(NamedColor);
@@ -620,6 +622,15 @@ constexpr Color::Color(NamedColor named)
 using Gfx::Color;
 
 namespace AK {
+
+template<>
+class Traits<Color> : public DefaultTraits<Color> {
+public:
+    static unsigned hash(Color const& color)
+    {
+        return int_hash(color.value());
+    }
+};
 
 template<>
 struct Formatter<Gfx::Color> : public Formatter<StringView> {

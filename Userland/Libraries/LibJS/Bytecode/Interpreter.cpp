@@ -46,11 +46,14 @@ static ByteString format_operand(StringView name, Operand operand, Bytecode::Exe
         builder.appendff("\033[32m{}\033[0m:", name);
     switch (operand.type()) {
     case Operand::Type::Register:
-        builder.appendff("\033[33mreg{}\033[0m", operand.index());
+        if (operand.index() == Register::this_value().index()) {
+            builder.appendff("\033[33mthis\033[0m");
+        } else {
+            builder.appendff("\033[33mreg{}\033[0m", operand.index());
+        }
         break;
     case Operand::Type::Local:
-        // FIXME: Show local name.
-        builder.appendff("\033[34mloc{}\033[0m", operand.index());
+        builder.appendff("\033[34m{}~{}\033[0m", executable.local_variable_names[operand.index() - executable.local_index_base], operand.index() - executable.local_index_base);
         break;
     case Operand::Type::Constant: {
         builder.append("\033[36m"sv);
@@ -161,6 +164,22 @@ ALWAYS_INLINE void Interpreter::set(Operand op, Value value)
     m_registers_and_constants_and_locals.data()[op.index()] = value;
 }
 
+ALWAYS_INLINE Value Interpreter::do_yield(Value value, Optional<Label> continuation)
+{
+    auto object = Object::create(realm(), nullptr);
+    object->define_direct_property("result", value, JS::default_attributes);
+
+    if (continuation.has_value())
+        // FIXME: If we get a pointer, which is not accurately representable as a double
+        //        will cause this to explode
+        object->define_direct_property("continuation", Value(continuation->address()), JS::default_attributes);
+    else
+        object->define_direct_property("continuation", js_null(), JS::default_attributes);
+
+    object->define_direct_property("isAwait", Value(false), JS::default_attributes);
+    return object;
+}
+
 // 16.1.6 ScriptEvaluation ( scriptRecord ), https://tc39.es/ecma262/#sec-runtime-semantics-scriptevaluation
 ThrowCompletionOr<Value> Interpreter::run(Script& script_record, JS::GCPtr<Environment> lexical_environment_override)
 {
@@ -170,7 +189,7 @@ ThrowCompletionOr<Value> Interpreter::run(Script& script_record, JS::GCPtr<Envir
     auto& global_environment = script_record.realm().global_environment();
 
     // 2. Let scriptContext be a new ECMAScript code execution context.
-    auto script_context = ExecutionContext::create(vm.heap());
+    auto script_context = ExecutionContext::create();
 
     // 3. Set the Function of scriptContext to null.
     // NOTE: This was done during execution context construction.
@@ -356,8 +375,6 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
         goto* bytecode_dispatch_table[static_cast<size_t>(next_instruction.type())];                \
     } while (0)
 
-    bool will_yield = false;
-
     for (;;) {
     start:
         for (;;) {
@@ -486,7 +503,19 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
             }
             if (!saved_return_value().is_empty()) {
                 do_return(saved_return_value());
-                goto run_finalizer_and_return;
+                if (auto handlers = executable.exception_handlers_for_offset(program_counter); handlers.has_value()) {
+                    if (auto finalizer = handlers.value().finalizer_offset; finalizer.has_value()) {
+                        VERIFY(!running_execution_context.unwind_contexts.is_empty());
+                        auto& unwind_context = running_execution_context.unwind_contexts.last();
+                        VERIFY(unwind_context.executable == m_current_executable);
+                        reg(Register::saved_return_value()) = reg(Register::return_value());
+                        reg(Register::return_value()) = {};
+                        program_counter = finalizer.value();
+                        // the unwind_context will be pop'ed when entering the finally block
+                        goto start;
+                    }
+                }
+                return;
             }
             auto const old_scheduled_jump = running_execution_context.previously_scheduled_jumps.take_last();
             if (m_scheduled_jump.has_value()) {
@@ -529,7 +558,7 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
     handle_##name:                                                                          \
     {                                                                                       \
         auto& instruction = *reinterpret_cast<Op::name const*>(&bytecode[program_counter]); \
-        (void)instruction.execute_impl(*this);                                              \
+        instruction.execute_impl(*this);                                                    \
         DISPATCH_NEXT(name);                                                                \
     }
 
@@ -571,6 +600,8 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
             HANDLE_INSTRUCTION(GetGlobal);
             HANDLE_INSTRUCTION_WITHOUT_EXCEPTION_CHECK(GetImportMeta);
             HANDLE_INSTRUCTION(GetIterator);
+            HANDLE_INSTRUCTION(GetLength);
+            HANDLE_INSTRUCTION(GetLengthWithThis);
             HANDLE_INSTRUCTION(GetMethod);
             HANDLE_INSTRUCTION_WITHOUT_EXCEPTION_CHECK(GetNewTarget);
             HANDLE_INSTRUCTION(GetNextMethodFromIteratorRecord);
@@ -609,6 +640,7 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
             HANDLE_INSTRUCTION_WITHOUT_EXCEPTION_CHECK(NewRegExp);
             HANDLE_INSTRUCTION_WITHOUT_EXCEPTION_CHECK(NewTypeError);
             HANDLE_INSTRUCTION(Not);
+            HANDLE_INSTRUCTION_WITHOUT_EXCEPTION_CHECK(PrepareYield);
             HANDLE_INSTRUCTION(PostfixDecrement);
             HANDLE_INSTRUCTION(PostfixIncrement);
             HANDLE_INSTRUCTION(PutById);
@@ -631,51 +663,33 @@ FLATTEN_ON_CLANG void Interpreter::run_bytecode(size_t entry_point)
             HANDLE_INSTRUCTION(ThrowIfNullish);
             HANDLE_INSTRUCTION(ThrowIfTDZ);
             HANDLE_INSTRUCTION(Typeof);
-            HANDLE_INSTRUCTION(TypeofVariable);
+            HANDLE_INSTRUCTION(TypeofBinding);
             HANDLE_INSTRUCTION(UnaryMinus);
             HANDLE_INSTRUCTION(UnaryPlus);
             HANDLE_INSTRUCTION(UnsignedRightShift);
 
         handle_Await: {
             auto& instruction = *reinterpret_cast<Op::Await const*>(&bytecode[program_counter]);
-            (void)instruction.execute_impl(*this);
-            will_yield = true;
-            goto run_finalizer_and_return;
+            instruction.execute_impl(*this);
+            return;
         }
 
         handle_Return: {
             auto& instruction = *reinterpret_cast<Op::Return const*>(&bytecode[program_counter]);
-            (void)instruction.execute_impl(*this);
-            goto run_finalizer_and_return;
+            instruction.execute_impl(*this);
+            return;
         }
 
         handle_Yield: {
             auto& instruction = *reinterpret_cast<Op::Yield const*>(&bytecode[program_counter]);
-            (void)instruction.execute_impl(*this);
+            instruction.execute_impl(*this);
             // Note: A `yield` statement will not go through a finally statement,
             //       hence we need to set a flag to not do so,
             //       but we generate a Yield Operation in the case of returns in
             //       generators as well, so we need to check if it will actually
             //       continue or is a `return` in disguise
-            will_yield = instruction.continuation().has_value();
-            goto run_finalizer_and_return;
+            return;
         }
-        }
-    }
-
-run_finalizer_and_return:
-    if (!will_yield) {
-        if (auto handlers = executable.exception_handlers_for_offset(program_counter); handlers.has_value()) {
-            if (auto finalizer = handlers.value().finalizer_offset; finalizer.has_value()) {
-                VERIFY(!running_execution_context.unwind_contexts.is_empty());
-                auto& unwind_context = running_execution_context.unwind_contexts.last();
-                VERIFY(unwind_context.executable == m_current_executable);
-                reg(Register::saved_return_value()) = reg(Register::return_value());
-                reg(Register::return_value()) = {};
-                program_counter = finalizer.value();
-                // the unwind_context will be pop'ed when entering the finally block
-                goto start;
-            }
         }
     }
 }
@@ -693,9 +707,9 @@ Interpreter::ResultAndReturnRegister Interpreter::run_executable(Executable& exe
     VERIFY(!vm().execution_context_stack().is_empty());
 
     auto& running_execution_context = vm().running_execution_context();
-    u32 registers_and_contants_count = executable.number_of_registers + executable.constants.size();
-    if (running_execution_context.registers_and_constants_and_locals.size() < registers_and_contants_count)
-        running_execution_context.registers_and_constants_and_locals.resize(registers_and_contants_count);
+    u32 registers_and_constants_and_locals_count = executable.number_of_registers + executable.constants.size() + executable.local_variable_names.size();
+    if (running_execution_context.registers_and_constants_and_locals.size() < registers_and_constants_and_locals_count)
+        running_execution_context.registers_and_constants_and_locals.resize(registers_and_constants_and_locals_count);
 
     TemporaryChange restore_running_execution_context { m_running_execution_context, &running_execution_context };
     TemporaryChange restore_arguments { m_arguments, running_execution_context.arguments.span() };
@@ -703,6 +717,13 @@ Interpreter::ResultAndReturnRegister Interpreter::run_executable(Executable& exe
 
     reg(Register::accumulator()) = initial_accumulator_value;
     reg(Register::return_value()) = {};
+
+    // NOTE: We only copy the `this` value from ExecutionContext if it's not already set.
+    //       If we are re-entering an async/generator context, the `this` value
+    //       may have already been cached by a ResolveThisBinding instruction,
+    //       and subsequent instructions expect this value to be set.
+    if (reg(Register::this_value()).is_empty())
+        reg(Register::this_value()) = running_execution_context.this_value;
 
     running_execution_context.executable = &executable;
 
@@ -939,7 +960,7 @@ ThrowCompletionOr<void> Sub::execute_impl(Bytecode::Interpreter& interpreter) co
 
     if (lhs.is_number() && rhs.is_number()) {
         if (lhs.is_int32() && rhs.is_int32()) {
-            if (!Checked<i32>::addition_would_overflow(lhs.as_i32(), -rhs.as_i32())) {
+            if (!Checked<i32>::subtraction_would_overflow(lhs.as_i32(), rhs.as_i32())) {
                 interpreter.set(m_dst, Value(lhs.as_i32() - rhs.as_i32()));
                 return {};
             }
@@ -1300,14 +1321,13 @@ void CreatePrivateEnvironment::execute_impl(Bytecode::Interpreter& interpreter) 
     running_execution_context.private_environment = new_private_environment(interpreter.vm(), outer_private_environment);
 }
 
-ThrowCompletionOr<void> CreateVariableEnvironment::execute_impl(Bytecode::Interpreter& interpreter) const
+void CreateVariableEnvironment::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto& running_execution_context = interpreter.running_execution_context();
     auto var_environment = new_declarative_environment(*running_execution_context.lexical_environment);
     var_environment->ensure_capacity(m_capacity);
     running_execution_context.variable_environment = var_environment;
     running_execution_context.lexical_environment = var_environment;
-    return {};
 }
 
 ThrowCompletionOr<void> EnterObjectEnvironment::execute_impl(Bytecode::Interpreter& interpreter) const
@@ -1361,6 +1381,11 @@ ThrowCompletionOr<void> CreateArguments::execute_impl(Bytecode::Interpreter& int
         arguments_object = create_mapped_arguments_object(interpreter.vm(), *function, function->formal_parameters(), passed_arguments, *environment);
     } else {
         arguments_object = create_unmapped_arguments_object(interpreter.vm(), passed_arguments);
+    }
+
+    if (m_dst.has_value()) {
+        interpreter.set(*m_dst, arguments_object);
+        return {};
     }
 
     if (m_is_immutable) {
@@ -1448,6 +1473,26 @@ ThrowCompletionOr<void> GetByIdWithThis::execute_impl(Bytecode::Interpreter& int
     return {};
 }
 
+ThrowCompletionOr<void> GetLength::execute_impl(Bytecode::Interpreter& interpreter) const
+{
+    auto base_identifier = interpreter.current_executable().get_identifier(m_base_identifier);
+
+    auto base_value = interpreter.get(base());
+    auto& cache = interpreter.current_executable().property_lookup_caches[m_cache_index];
+
+    interpreter.set(dst(), TRY(get_by_id<GetByIdMode::Length>(interpreter.vm(), base_identifier, interpreter.vm().names.length.as_string(), base_value, base_value, cache)));
+    return {};
+}
+
+ThrowCompletionOr<void> GetLengthWithThis::execute_impl(Bytecode::Interpreter& interpreter) const
+{
+    auto base_value = interpreter.get(m_base);
+    auto this_value = interpreter.get(m_this_value);
+    auto& cache = interpreter.current_executable().property_lookup_caches[m_cache_index];
+    interpreter.set(dst(), TRY(get_by_id<GetByIdMode::Length>(interpreter.vm(), {}, interpreter.vm().names.length.as_string(), base_value, this_value, cache)));
+    return {};
+}
+
 ThrowCompletionOr<void> GetPrivateById::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto& vm = interpreter.vm();
@@ -1528,13 +1573,17 @@ ThrowCompletionOr<void> DeleteByIdWithThis::execute_impl(Bytecode::Interpreter& 
 ThrowCompletionOr<void> ResolveThisBinding::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto& cached_this_value = interpreter.reg(Register::this_value());
-    if (cached_this_value.is_empty()) {
-        // OPTIMIZATION: Because the value of 'this' cannot be reassigned during a function execution, it's
-        //               resolved once and then saved for subsequent use.
+    if (!cached_this_value.is_empty())
+        return {};
+    // OPTIMIZATION: Because the value of 'this' cannot be reassigned during a function execution, it's
+    //               resolved once and then saved for subsequent use.
+    auto& running_execution_context = interpreter.running_execution_context();
+    if (auto function = running_execution_context.function; function && is<ECMAScriptFunctionObject>(*function) && !static_cast<ECMAScriptFunctionObject&>(*function).allocates_function_environment()) {
+        cached_this_value = running_execution_context.this_value;
+    } else {
         auto& vm = interpreter.vm();
         cached_this_value = TRY(vm.resolve_this_binding());
     }
-    interpreter.set(dst(), cached_this_value);
     return {};
 }
 
@@ -1768,27 +1817,20 @@ void LeaveUnwindContext::execute_impl(Bytecode::Interpreter& interpreter) const
     interpreter.leave_unwind_context();
 }
 
-ThrowCompletionOr<void> Yield::execute_impl(Bytecode::Interpreter& interpreter) const
+void Yield::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto yielded_value = interpreter.get(m_value).value_or(js_undefined());
-
-    auto object = Object::create(interpreter.realm(), nullptr);
-    object->define_direct_property("result", yielded_value, JS::default_attributes);
-
-    if (m_continuation_label.has_value())
-        // FIXME: If we get a pointer, which is not accurately representable as a double
-        //        will cause this to explode
-        object->define_direct_property("continuation", Value(m_continuation_label->address()), JS::default_attributes);
-    else
-        object->define_direct_property("continuation", js_null(), JS::default_attributes);
-
-    object->define_direct_property("isAwait", Value(false), JS::default_attributes);
-    interpreter.do_return(object);
-
-    return {};
+    interpreter.do_return(
+        interpreter.do_yield(yielded_value, m_continuation_label));
 }
 
-ThrowCompletionOr<void> Await::execute_impl(Bytecode::Interpreter& interpreter) const
+void PrepareYield::execute_impl(Bytecode::Interpreter& interpreter) const
+{
+    auto value = interpreter.get(m_value).value_or(js_undefined());
+    interpreter.set(m_dest, interpreter.do_yield(value, {}));
+}
+
+void Await::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto yielded_value = interpreter.get(m_argument).value_or(js_undefined());
     auto object = Object::create(interpreter.realm(), nullptr);
@@ -1798,7 +1840,6 @@ ThrowCompletionOr<void> Await::execute_impl(Bytecode::Interpreter& interpreter) 
     object->define_direct_property("continuation", Value(m_continuation_label.address()), JS::default_attributes);
     object->define_direct_property("isAwait", Value(true), JS::default_attributes);
     interpreter.do_return(object);
-    return {};
 }
 
 ThrowCompletionOr<void> GetByValue::execute_impl(Bytecode::Interpreter& interpreter) const
@@ -1938,10 +1979,41 @@ ThrowCompletionOr<void> NewClass::execute_impl(Bytecode::Interpreter& interprete
 }
 
 // 13.5.3.1 Runtime Semantics: Evaluation, https://tc39.es/ecma262/#sec-typeof-operator-runtime-semantics-evaluation
-ThrowCompletionOr<void> TypeofVariable::execute_impl(Bytecode::Interpreter& interpreter) const
+ThrowCompletionOr<void> TypeofBinding::execute_impl(Bytecode::Interpreter& interpreter) const
 {
     auto& vm = interpreter.vm();
-    interpreter.set(dst(), TRY(typeof_variable(vm, interpreter.current_executable().get_identifier(m_identifier))));
+
+    if (m_cache.is_valid()) {
+        auto const* environment = interpreter.running_execution_context().lexical_environment.ptr();
+        for (size_t i = 0; i < m_cache.hops; ++i)
+            environment = environment->outer_environment();
+        if (!environment->is_permanently_screwed_by_eval()) {
+            auto value = TRY(static_cast<DeclarativeEnvironment const&>(*environment).get_binding_value_direct(vm, m_cache.index));
+            interpreter.set(dst(), PrimitiveString::create(vm, value.typeof()));
+            return {};
+        }
+        m_cache = {};
+    }
+
+    // 1. Let val be the result of evaluating UnaryExpression.
+    auto reference = TRY(vm.resolve_binding(interpreter.current_executable().get_identifier(m_identifier)));
+
+    // 2. If val is a Reference Record, then
+    //    a. If IsUnresolvableReference(val) is true, return "undefined".
+    if (reference.is_unresolvable()) {
+        interpreter.set(dst(), PrimitiveString::create(vm, "undefined"_string));
+        return {};
+    }
+
+    // 3. Set val to ? GetValue(val).
+    auto value = TRY(reference.get_value(vm));
+
+    if (reference.environment_coordinate().has_value())
+        m_cache = reference.environment_coordinate().value();
+
+    // 4. NOTE: This step is replaced in section B.3.6.3.
+    // 5. Return a String according to Table 41.
+    interpreter.set(dst(), PrimitiveString::create(vm, value.typeof()));
     return {};
 }
 
@@ -2088,9 +2160,14 @@ ByteString CreateRestParams::to_byte_string_impl(Bytecode::Executable const& exe
     return ByteString::formatted("CreateRestParams {}, rest_index:{}", format_operand("dst"sv, m_dst, executable), m_rest_index);
 }
 
-ByteString CreateArguments::to_byte_string_impl(Bytecode::Executable const&) const
+ByteString CreateArguments::to_byte_string_impl(Bytecode::Executable const& executable) const
 {
-    return ByteString::formatted("CreateArguments {} immutable:{}", m_kind == Kind::Mapped ? "mapped"sv : "unmapped"sv, m_is_immutable);
+    StringBuilder builder;
+    builder.appendff("CreateArguments");
+    if (m_dst.has_value())
+        builder.appendff(" {}", format_operand("dst"sv, *m_dst, executable));
+    builder.appendff(" {} immutable:{}", m_kind == Kind::Mapped ? "mapped"sv : "unmapped"sv, m_is_immutable);
+    return builder.to_byte_string();
 }
 
 ByteString EnterObjectEnvironment::to_byte_string_impl(Executable const& executable) const
@@ -2202,6 +2279,21 @@ ByteString GetByIdWithThis::to_byte_string_impl(Bytecode::Executable const& exec
         format_operand("dst"sv, m_dst, executable),
         format_operand("base"sv, m_base, executable),
         executable.identifier_table->get(m_property),
+        format_operand("this"sv, m_this_value, executable));
+}
+
+ByteString GetLength::to_byte_string_impl(Bytecode::Executable const& executable) const
+{
+    return ByteString::formatted("GetLength {}, {}",
+        format_operand("dst"sv, m_dst, executable),
+        format_operand("base"sv, m_base, executable));
+}
+
+ByteString GetLengthWithThis::to_byte_string_impl(Bytecode::Executable const& executable) const
+{
+    return ByteString::formatted("GetLengthWithThis {}, {}, {}",
+        format_operand("dst"sv, m_dst, executable),
+        format_operand("base"sv, m_base, executable),
         format_operand("this"sv, m_this_value, executable));
 }
 
@@ -2478,6 +2570,13 @@ ByteString Yield::to_byte_string_impl(Bytecode::Executable const& executable) co
         format_operand("value"sv, m_value, executable));
 }
 
+ByteString PrepareYield::to_byte_string_impl(Bytecode::Executable const& executable) const
+{
+    return ByteString::formatted("PrepareYield {}, {}",
+        format_operand("dst"sv, m_dest, executable),
+        format_operand("value"sv, m_value, executable));
+}
+
 ByteString Await::to_byte_string_impl(Bytecode::Executable const& executable) const
 {
     return ByteString::formatted("Await {}, continuation:{}",
@@ -2596,9 +2695,9 @@ ByteString IteratorNext::to_byte_string_impl(Executable const& executable) const
         format_operand("iterator_record"sv, m_iterator_record, executable));
 }
 
-ByteString ResolveThisBinding::to_byte_string_impl(Bytecode::Executable const& executable) const
+ByteString ResolveThisBinding::to_byte_string_impl(Bytecode::Executable const&) const
 {
-    return ByteString::formatted("ResolveThisBinding {}", format_operand("dst"sv, m_dst, executable));
+    return "ResolveThisBinding"sv;
 }
 
 ByteString ResolveSuperBase::to_byte_string_impl(Bytecode::Executable const& executable) const
@@ -2617,9 +2716,9 @@ ByteString GetImportMeta::to_byte_string_impl(Bytecode::Executable const& execut
     return ByteString::formatted("GetImportMeta {}", format_operand("dst"sv, m_dst, executable));
 }
 
-ByteString TypeofVariable::to_byte_string_impl(Bytecode::Executable const& executable) const
+ByteString TypeofBinding::to_byte_string_impl(Bytecode::Executable const& executable) const
 {
-    return ByteString::formatted("TypeofVariable {}, {}",
+    return ByteString::formatted("TypeofBinding {}, {}",
         format_operand("dst"sv, m_dst, executable),
         executable.identifier_table->get(m_identifier));
 }

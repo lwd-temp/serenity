@@ -23,6 +23,7 @@
 #include <Kernel/Devices/Storage/SD/PCISDHostController.h>
 #include <Kernel/Devices/Storage/SD/SDHostController.h>
 #include <Kernel/Devices/Storage/StorageManagement.h>
+#include <Kernel/Devices/Storage/VirtIO/VirtIOBlockController.h>
 #include <Kernel/FileSystem/Ext2FS/FileSystem.h>
 #include <Kernel/FileSystem/VirtualFileSystem.h>
 #include <Kernel/Library/Panic.h>
@@ -103,6 +104,8 @@ UNMAP_AFTER_INIT void StorageManagement::enumerate_pci_controllers(bool nvme_pol
             }
         }));
 
+        RefPtr<VirtIOBlockController> virtio_controller;
+
         auto const& handle_mass_storage_device = [&](PCI::DeviceIdentifier const& device_identifier) {
             using SubclassID = PCI::MassStorage::SubclassID;
 
@@ -120,6 +123,16 @@ UNMAP_AFTER_INIT void StorageManagement::enumerate_pci_controllers(bool nvme_pol
                     dmesgln("Unable to initialize NVMe controller: {}", controller.error());
                 } else {
                     m_controllers.append(controller.release_value());
+                }
+            }
+            if (VirtIOBlockController::is_handled(device_identifier)) {
+                if (virtio_controller.is_null()) {
+                    auto controller = make_ref_counted<VirtIOBlockController>();
+                    m_controllers.append(controller);
+                    virtio_controller = controller;
+                }
+                if (auto res = virtio_controller->add_device(device_identifier); res.is_error()) {
+                    dmesgln("Unable to initialize VirtIO block device: {}", res.error());
                 }
             }
         };
@@ -165,16 +178,16 @@ UNMAP_AFTER_INIT void StorageManagement::enumerate_storage_devices()
 
 UNMAP_AFTER_INIT void StorageManagement::dump_storage_devices_and_partitions() const
 {
-    dbgln("StorageManagement: Detected {} storage devices", m_storage_devices.size_slow());
+    critical_dmesgln("StorageManagement: Detected {} storage devices", m_storage_devices.size_slow());
     for (auto const& storage_device : m_storage_devices) {
         auto const& partitions = storage_device.partitions();
         if (partitions.is_empty()) {
-            dbgln("  Device: block{}:{} (no partitions)", storage_device.major(), storage_device.minor());
+            critical_dmesgln("  Device: block{}:{} (no partitions)", storage_device.major(), storage_device.minor());
         } else {
-            dbgln("  Device: block{}:{} ({} partitions)", storage_device.major(), storage_device.minor(), partitions.size());
+            critical_dmesgln("  Device: block{}:{} ({} partitions)", storage_device.major(), storage_device.minor(), partitions.size());
             unsigned partition_number = 1;
             for (auto const& partition : partitions) {
-                dbgln("    Partition: {}, block{}:{} (UUID {})", partition_number, partition->major(), partition->minor(), partition->metadata().unique_guid().to_string());
+                critical_dmesgln("    Partition: {}, block{}:{} (UUID {})", partition_number, partition->major(), partition->minor(), partition->metadata().unique_guid().to_string());
                 partition_number++;
             }
         }

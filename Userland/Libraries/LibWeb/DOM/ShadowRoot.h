@@ -25,6 +25,15 @@ public:
     bool delegates_focus() const { return m_delegates_focus; }
     void set_delegates_focus(bool delegates_focus) { m_delegates_focus = delegates_focus; }
 
+    [[nodiscard]] bool declarative() const { return m_declarative; }
+    void set_declarative(bool declarative) { m_declarative = declarative; }
+
+    [[nodiscard]] bool clonable() const { return m_clonable; }
+    void set_clonable(bool clonable) { m_clonable = clonable; }
+
+    [[nodiscard]] bool serializable() const { return m_serializable; }
+    void set_serializable(bool serializable) { m_serializable = serializable; }
+
     void set_onslotchange(WebIDL::CallbackType*);
     WebIDL::CallbackType* onslotchange();
 
@@ -37,6 +46,10 @@ public:
     WebIDL::ExceptionOr<String> inner_html() const;
     WebIDL::ExceptionOr<void> set_inner_html(StringView);
 
+    WebIDL::ExceptionOr<void> set_html_unsafe(StringView);
+
+    WebIDL::ExceptionOr<String> get_html(GetHTMLOptions const&) const;
+
     CSS::StyleSheetList& style_sheets();
     CSS::StyleSheetList const& style_sheets() const;
 
@@ -46,6 +59,8 @@ public:
     WebIDL::ExceptionOr<void> set_adopted_style_sheets(JS::Value);
 
     void for_each_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const;
+
+    Vector<JS::NonnullGCPtr<Animations::Animation>> get_animations();
 
     virtual void finalize() override;
 
@@ -66,6 +81,15 @@ private:
     bool m_delegates_focus { false };
     bool m_available_to_element_internals { false };
 
+    // https://dom.spec.whatwg.org/#shadowroot-declarative
+    bool m_declarative { false };
+
+    // https://dom.spec.whatwg.org/#shadowroot-clonable
+    bool m_clonable { false };
+
+    // https://dom.spec.whatwg.org/#shadowroot-serializable
+    bool m_serializable { false };
+
     JS::GCPtr<CSS::StyleSheetList> m_style_sheets;
     mutable JS::GCPtr<WebIDL::ObservableArray> m_adopted_style_sheets;
 };
@@ -80,7 +104,7 @@ inline TraversalDecision Node::for_each_shadow_including_inclusive_descendant(Ca
         return TraversalDecision::Break;
     for (auto* child = first_child(); child; child = child->next_sibling()) {
         if (child->is_element()) {
-            if (JS::GCPtr<ShadowRoot> shadow_root = static_cast<Element*>(child)->shadow_root_internal()) {
+            if (auto shadow_root = static_cast<Element*>(child)->shadow_root()) {
                 if (shadow_root->for_each_shadow_including_inclusive_descendant(callback) == TraversalDecision::Break)
                     return TraversalDecision::Break;
             }

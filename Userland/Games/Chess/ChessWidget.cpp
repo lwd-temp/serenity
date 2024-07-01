@@ -9,7 +9,9 @@
 
 #include "ChessWidget.h"
 #include "PromotionDialog.h"
+#include <AK/Enumerate.h>
 #include <AK/GenericLexer.h>
+#include <AK/NumberFormat.h>
 #include <AK/Random.h>
 #include <AK/String.h>
 #include <LibCore/Account.h>
@@ -24,6 +26,8 @@
 #include <LibGfx/Path.h>
 #include <unistd.h>
 
+namespace Chess {
+
 ErrorOr<NonnullRefPtr<ChessWidget>> ChessWidget::try_create()
 {
     auto widget = TRY(AK::adopt_nonnull_ref_or_enomem(new (nothrow) ChessWidget));
@@ -35,7 +39,6 @@ ErrorOr<NonnullRefPtr<ChessWidget>> ChessWidget::try_create()
 void ChessWidget::paint_event(GUI::PaintEvent& event)
 {
     int const min_size = min(width(), height());
-    int const widget_offset_x = (window()->width() - min_size) / 2;
     int const widget_offset_y = (window()->height() - min_size) / 2;
 
     GUI::Frame::paint_event(event);
@@ -43,9 +46,9 @@ void ChessWidget::paint_event(GUI::PaintEvent& event)
     GUI::Painter painter(*this);
     painter.add_clip_rect(event.rect());
 
-    painter.fill_rect(frame_inner_rect(), Color::Black);
+    painter.fill_rect(frame_inner_rect(), Gfx::Color::Black);
 
-    painter.translate(frame_thickness() + widget_offset_x, frame_thickness() + widget_offset_y);
+    painter.translate(frame_thickness(), frame_thickness() + widget_offset_y);
 
     auto square_width = min_size / 8;
     auto square_height = min_size / 8;
@@ -74,8 +77,8 @@ void ChessWidget::paint_event(GUI::PaintEvent& event)
             auto const piece = active_board.get_piece(sq);
             if (m_highlight_checks && last_move.is_check && piece.type == Chess::Type::King && piece.color == active_board.turn()) {
                 Array<Gfx::ColorStop, 2> colors = {
-                    Gfx::ColorStop { .color = Color::Red, .position = 0.16f },
-                    Gfx::ColorStop { .color = Color::Transparent, .position = .66f }
+                    Gfx::ColorStop { .color = Gfx::Color::Red, .position = 0.16f },
+                    Gfx::ColorStop { .color = Gfx::Color::Transparent, .position = .66f }
                 };
 
                 painter.fill_rect_with_radial_gradient(tile_rect, colors, tile_rect.center() - tile_rect.top_left(), tile_rect.size());
@@ -209,7 +212,6 @@ void ChessWidget::paint_event(GUI::PaintEvent& event)
 void ChessWidget::mousedown_event(GUI::MouseEvent& event)
 {
     int const min_size = min(width(), height());
-    int const widget_offset_x = (window()->width() - min_size) / 2;
     int const widget_offset_y = (window()->height() - min_size) / 2;
 
     if (!frame_inner_rect().contains(event.position()))
@@ -235,7 +237,7 @@ void ChessWidget::mousedown_event(GUI::MouseEvent& event)
     if (drag_enabled() && piece.color == board().turn() && !m_playback) {
         m_dragging_piece = true;
         set_override_cursor(Gfx::StandardCursor::Drag);
-        m_drag_point = { event.position().x() - widget_offset_x, event.position().y() - widget_offset_y };
+        m_drag_point = { event.position().x(), event.position().y() - widget_offset_y };
         m_moving_square = square.value();
 
         m_board.generate_moves([&](Chess::Move move) {
@@ -287,12 +289,22 @@ void ChessWidget::mouseup_event(GUI::MouseEvent& event)
 
     Chess::Move move = { m_moving_square, target_square.release_value() };
     if (board().is_promotion_move(move)) {
-        auto promotion_dialog = PromotionDialog::construct(*this);
+        auto promotion_dialog = MUST(PromotionDialog::try_create(*this));
         if (promotion_dialog->exec() == PromotionDialog::ExecResult::OK)
             move.promote_to = promotion_dialog->selected_piece();
     }
 
+    if (board().moves().size() == 0) {
+        if (!m_timer->is_active() && !m_unlimited_time_control) {
+            m_timer->start();
+        }
+    }
+
     if (board().apply_move(move)) {
+        update_move_display_widget(m_board);
+        if (!m_unlimited_time_control) {
+            apply_increment(move);
+        }
         m_playback_move_number = board().moves().size();
         m_playback = false;
         m_board_playback = m_board;
@@ -308,7 +320,6 @@ void ChessWidget::mouseup_event(GUI::MouseEvent& event)
 void ChessWidget::mousemove_event(GUI::MouseEvent& event)
 {
     int const min_size = min(width(), height());
-    int const widget_offset_x = (window()->width() - min_size) / 2;
     int const widget_offset_y = (window()->height() - min_size) / 2;
 
     if (!frame_inner_rect().contains(event.position()))
@@ -332,7 +343,7 @@ void ChessWidget::mousemove_event(GUI::MouseEvent& event)
         return;
     }
 
-    m_drag_point = { event.position().x() - widget_offset_x, event.position().y() - widget_offset_y };
+    m_drag_point = { event.position().x(), event.position().y() - widget_offset_y };
     update();
 }
 
@@ -397,10 +408,9 @@ void ChessWidget::set_piece_set(StringView set)
 Optional<Chess::Square> ChessWidget::mouse_to_square(GUI::MouseEvent& event) const
 {
     int const min_size = min(width(), height());
-    int const widget_offset_x = (window()->width() - min_size) / 2;
     int const widget_offset_y = (window()->height() - min_size) / 2;
 
-    auto x = event.x() - widget_offset_x;
+    auto x = event.x();
     auto y = event.y() - widget_offset_y;
     if (x < 0 || y < 0 || x > min_size || y > min_size)
         return {};
@@ -431,11 +441,22 @@ void ChessWidget::reset()
     m_playback_move_number = 0;
     m_board_playback = Chess::Board();
     m_board = Chess::Board();
+    update_move_display_widget(m_board);
     m_side = (get_random<u32>() % 2) ? Chess::Color::White : Chess::Color::Black;
     m_drag_enabled = true;
+    m_white_time_elapsed = 0;
+    m_black_time_elapsed = 0;
+    m_timer->stop();
+
     if (m_engine)
         m_engine->start_new_game();
 
+    if (m_unlimited_time_control) {
+        m_white_time_label->set_text("White time: -"_string);
+        m_black_time_label->set_text("Black time: -"_string);
+    } else {
+        update_time_labels(m_time_control_seconds, m_time_control_seconds);
+    }
     input_engine_move();
     update();
 }
@@ -445,11 +466,11 @@ void ChessWidget::set_board_theme(StringView name)
     // FIXME: Add some kind of themes.json
     // The following Colors have been taken from lichess.org, but i'm pretty sure they took them from chess.com.
     if (name == "Beige") {
-        m_board_theme = { "Beige"sv, Color::from_rgb(0xb58863), Color::from_rgb(0xf0d9b5) };
+        m_board_theme = { "Beige"sv, Gfx::Color::from_rgb(0xb58863), Gfx::Color::from_rgb(0xf0d9b5) };
     } else if (name == "Green") {
-        m_board_theme = { "Green"sv, Color::from_rgb(0x86a666), Color::from_rgb(0xffffdd) };
+        m_board_theme = { "Green"sv, Gfx::Color::from_rgb(0x86a666), Gfx::Color::from_rgb(0xffffdd) };
     } else if (name == "Blue") {
-        m_board_theme = { "Blue"sv, Color::from_rgb(0x8ca2ad), Color::from_rgb(0xdee3e6) };
+        m_board_theme = { "Blue"sv, Gfx::Color::from_rgb(0x8ca2ad), Gfx::Color::from_rgb(0xdee3e6) };
     } else {
         set_board_theme("Beige"sv);
     }
@@ -473,6 +494,12 @@ void ChessWidget::input_engine_move()
     if (drag_was_enabled)
         set_drag_enabled(false);
 
+    if (board().moves().size() == 0) {
+        if (!m_timer->is_active() && !m_unlimited_time_control) {
+            m_timer->start();
+        }
+    }
+
     set_override_cursor(Gfx::StandardCursor::Wait);
     m_engine->get_best_move(board(), 4000, [this, drag_was_enabled](ErrorOr<Chess::Move> move) {
         set_override_cursor(Gfx::StandardCursor::None);
@@ -481,10 +508,13 @@ void ChessWidget::input_engine_move()
         set_drag_enabled(drag_was_enabled);
         if (!move.is_error()) {
             VERIFY(board().apply_move(move.release_value()));
+            update_move_display_widget(board());
+            if (!m_unlimited_time_control) {
+                apply_increment(move.release_value());
+            }
             if (check_game_over(ClaimDrawBehavior::Prompt))
                 return;
         }
-
         m_playback_move_number = m_board.moves().size();
         m_playback = false;
         m_board_markings.clear();
@@ -507,6 +537,7 @@ void ChessWidget::playback_move(PlaybackDirection direction)
         m_board_playback = Chess::Board();
         for (size_t i = 0; i < m_playback_move_number - 1; i++)
             m_board_playback.apply_move(m_board.moves().at(i));
+        update_move_display_widget(m_board_playback);
         m_playback_move_number--;
         break;
     case PlaybackDirection::Forward:
@@ -515,6 +546,7 @@ void ChessWidget::playback_move(PlaybackDirection direction)
             return;
         }
         m_board_playback.apply_move(m_board.moves().at(m_playback_move_number++));
+        update_move_display_widget(m_board_playback);
         if (m_playback_move_number == m_board.moves().size())
             m_playback = false;
         break;
@@ -531,6 +563,21 @@ void ChessWidget::playback_move(PlaybackDirection direction)
         VERIFY_NOT_REACHED();
     }
     update();
+}
+
+void ChessWidget::update_move_display_widget(Chess::Board& board)
+{
+    size_t turn = 1;
+    StringBuilder sb;
+    for (auto [i, move] : enumerate(board.moves())) {
+        if (i % 2 == 0) {
+            sb.append(MUST(String::formatted("{}. {}", turn, MUST(move.to_algebraic()))));
+        } else {
+            sb.append(MUST(String::formatted(" {}\n", MUST(move.to_algebraic()))));
+            turn++;
+        }
+    }
+    m_move_display_widget->set_text(sb.string_view());
 }
 
 ErrorOr<String> ChessWidget::get_fen() const
@@ -738,6 +785,7 @@ ErrorOr<void, PGNParseError> ChessWidget::import_pgn(Core::File& file)
     m_board_playback = m_board;
     m_playback_move_number = m_board_playback.moves().size();
     m_playback = true;
+    update_move_display_widget(m_board_playback);
     update();
 
     return {};
@@ -764,7 +812,11 @@ ErrorOr<void> ChessWidget::export_pgn(Core::File& file) const
     TRY(file.write_until_depleted("[WhiteElo \"?\"]\n"sv.bytes()));
     TRY(file.write_until_depleted("[BlackElo \"?\"]\n"sv.bytes()));
     TRY(file.write_until_depleted("[Variant \"Standard\"]\n"sv.bytes()));
-    TRY(file.write_until_depleted("[TimeControl \"-\"]\n"sv.bytes()));
+    if (m_unlimited_time_control) {
+        TRY(file.write_until_depleted("[TimeControl \"-\"]\n"sv.bytes()));
+    } else {
+        TRY(file.write_until_depleted(TRY(String::formatted("[TimeControl \"{}+{}\"]\n", m_time_control_seconds, m_time_control_increment))));
+    }
     TRY(file.write_until_depleted("[Annotator \"SerenityOS Chess\"]\n"sv.bytes()));
     TRY(file.write_until_depleted("\n"sv.bytes()));
 
@@ -818,11 +870,65 @@ int ChessWidget::resign()
     board().set_resigned(m_board.turn());
 
     set_drag_enabled(false);
+    m_timer->stop();
     update();
     auto const msg = Chess::Board::result_to_string(m_board.game_result(), m_board.turn());
     GUI::MessageBox::show(window(), msg, "Game Over"sv, GUI::MessageBox::Type::Information);
 
     return 0;
+}
+
+void ChessWidget::initialize_timer()
+{
+    m_timer = Core::Timer::create_repeating(
+        1000, [this] {
+            // FIXME: Look into using AK/Timer methods to calculate elapsed time from
+            // start for greater accuracy.
+            auto white_time = m_time_control_seconds - m_white_time_elapsed;
+            auto black_time = m_time_control_seconds - m_black_time_elapsed;
+            if (m_board.turn() == Chess::Color::White) {
+                m_white_time_elapsed++;
+                update_time_labels(m_time_control_seconds - m_white_time_elapsed, black_time);
+                check_resign_on_time("White time out. Black wins."sv);
+            } else if (m_board.turn() == Chess::Color::Black) {
+                m_black_time_elapsed++;
+                update_time_labels(white_time, m_time_control_seconds - m_black_time_elapsed);
+                check_resign_on_time("Black time out. White wins."sv);
+            }
+        },
+        this);
+}
+
+void ChessWidget::apply_increment(Chess::Move move)
+{
+    if (move.piece.color == Chess::Color::White) {
+        m_white_time_elapsed -= m_time_control_increment;
+    } else {
+        m_black_time_elapsed -= m_time_control_increment;
+    }
+    update_time_labels(m_time_control_seconds - m_white_time_elapsed, m_time_control_seconds - m_black_time_elapsed);
+}
+
+void ChessWidget::update_time_labels(u32 white_time, u32 black_time)
+{
+    m_white_time_label->set_text(MUST(String::formatted("White time: {}", human_readable_digital_time(white_time))));
+    m_black_time_label->set_text(MUST(String::formatted("Black time: {}", human_readable_digital_time(black_time))));
+}
+
+void ChessWidget::check_resign_on_time(StringView msg)
+{
+    if (m_white_time_elapsed >= m_time_control_seconds) {
+        m_board.set_resigned(Chess::Color::White);
+    } else if (m_black_time_elapsed >= m_time_control_seconds) {
+        m_board.set_resigned(Chess::Color::Black);
+    } else {
+        return;
+    }
+    m_timer->stop();
+    set_override_cursor(Gfx::StandardCursor::None);
+    set_drag_enabled(false);
+    update();
+    GUI::MessageBox::show(window(), msg, "Game Over"sv, GUI::MessageBox::Type::Information);
 }
 
 bool ChessWidget::check_game_over(ClaimDrawBehavior claim_draw_behavior)
@@ -860,6 +966,7 @@ bool ChessWidget::check_game_over(ClaimDrawBehavior claim_draw_behavior)
 
     set_override_cursor(Gfx::StandardCursor::None);
     set_drag_enabled(false);
+    m_timer->stop();
     update();
     auto msg = Chess::Board::result_to_string(board().game_result(), board().turn());
     GUI::MessageBox::show(window(), msg, "Game Over"sv, GUI::MessageBox::Type::Information);
@@ -892,4 +999,6 @@ void ChessWidget::config_bool_did_change(StringView domain, StringView group, St
         set_highlight_checks(value);
         update();
     }
+}
+
 }

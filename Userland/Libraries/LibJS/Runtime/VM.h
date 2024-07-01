@@ -42,7 +42,7 @@ public:
     struct CustomData {
         virtual ~CustomData() = default;
 
-        virtual void spin_event_loop_until(NOESCAPE JS::SafeFunction<bool()> goal_condition) = 0;
+        virtual void spin_event_loop_until(JS::SafeFunction<bool()> goal_condition) = 0;
     };
 
     static ErrorOr<NonnullRefPtr<VM>> create(OwnPtr<CustomData> = {});
@@ -223,6 +223,7 @@ public:
     Function<void()> on_call_stack_emptied;
     Function<void(Promise&)> on_promise_unhandled_rejection;
     Function<void(Promise&)> on_promise_rejection_handled;
+    Function<void(Object const&, PropertyKey const&)> on_unimplemented_property_access;
 
     CustomData* custom_data() { return m_custom_data; }
 
